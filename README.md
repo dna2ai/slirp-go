@@ -12,14 +12,14 @@ Simple slirp implementation in golang for user mode Linux
 
 ```
 # example of ubuntu rootfs
-# before use proot to install inet-tools
+# before, use proot to install inet-tools/iproute2 for ifconfig and route
 $ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
 $ route add default gw 10.0.2.2
 $ apt update
 $ apt install -y curl
 $ curl https://www.google.com
 ```
-## unknown issues and future work
+## known issues and future work
 
 - [ ] no ipv6 support yet
 - [ ] no server support yet
@@ -77,7 +77,9 @@ write a program in golang:
 
 ```
 # gpt5-high
+\`\`\`
 <paste code of HandleTcpClnSYN, HandleTcpClnACK and some more code>
+\`\`\`
 above is the code to process ip packet for tcp connection in user mode linux,
 but use this code with curl, it always reports:
 `curl: (1) Received HTTP/0.9 when not allowed`
