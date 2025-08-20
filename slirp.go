@@ -33,6 +33,206 @@ const (
 	IP_HEADER_LEN = 20
 )
 
+type ConnKey struct {
+	SrcIP   uint32
+	SrcPort int
+	DstIP   uint32
+	DstPort int
+}
+
+type ConnVal struct {
+	// 0 none, 100 tcp client, 101 tcp server, 200 udp client, 201 udp server
+	Type int
+	Key *ConnKey
+	UDPcln *net.UDPConn
+	UDPsrv *net.UDPConn
+	TCPcln *net.TCPConn
+	TCPsrv *net.TCPListener
+	lastActivity time.Time
+	done chan bool
+	container *ConnMap
+	lock sync.Mutex
+	disposed bool
+}
+
+func (cv *ConnVal) IsTimeout(now *time.Time) bool {
+	if cv.disposed {
+		return true
+	}
+	if now == nil {
+		cur := time.Now()
+		now = &cur
+	}
+	var timeoutT time.Duration
+	switch(cv.Type) {
+	case 100: timeoutT = 24 * 3600 * time.Second
+	case 101: timeoutT = 24 * 3600 * time.Second
+	case 200: timeoutT = 2 * time.Second
+	case 201: timeoutT = 2 * time.Second
+	}
+	if (*now).Sub(cv.lastActivity) > timeoutT {
+		return true
+	}
+	return false
+}
+
+func (cv *ConnVal) Close() {
+	// TODO: send FIN, RST for tcp
+	switch(cv.Type) {
+	case 100:
+		if cv.TCPcln != nil {
+			cv.TCPcln.Close()
+			cv.TCPcln = nil
+		}
+	case 101:
+		if cv.TCPsrv != nil {
+			cv.TCPsrv.Close()
+			cv.TCPsrv = nil
+		}
+	case 200:
+		if cv.UDPcln != nil {
+			cv.UDPcln.Close()
+			cv.UDPcln = nil
+		}
+	case 201:
+		if cv.UDPsrv != nil {
+			cv.UDPsrv.Close()
+			cv.UDPsrv = nil
+		}
+	}
+}
+
+func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
+	buffer := make([]byte, 65535)
+	for {
+		select {
+		case <-cv.done:
+			return
+		default:
+			// Read response
+			cv.UDPcln.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := cv.UDPcln.Read(buffer)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				cv.Dispose()
+				return
+			}
+			cv.lastActivity = time.Now()
+			response := buffer[:n]
+			fmt.Fprintf(os.Stderr, "[D] UDP response\r\n")
+			fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(response), "\n", "\r\n"))
+
+			// Construct response packet
+			ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
+			//debugPrintDNSResponseInfo(ret)
+			encoded := encodeSLIP(ret)
+			go seqPrintPacket(encoded)
+		}
+	}
+}
+
+func (cv *ConnVal) Dispose() {
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	if cv.disposed {
+		return
+	}
+	cv.disposed = true
+	close(cv.done)
+	cv.Close()
+}
+
+type ConnMap struct {
+	data map[ConnKey]*ConnVal
+	mu   sync.RWMutex
+}
+
+func NewConnMap() *ConnMap {
+	cm := &ConnMap{
+		data: make(map[ConnKey]*ConnVal),
+	}
+	go cm.cleanup()
+	return cm
+}
+
+func (cm *ConnMap) cleanup() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		cm.mu.Lock()
+		now := time.Now()
+		for key, item := range cm.data {
+			if item.IsTimeout(&now) {
+				item.Dispose()
+				delete(cm.data, key)
+				fmt.Fprintf(os.Stderr, "[D] Timeout connection: %+v\r\n", key)
+			}
+		}
+		cm.mu.Unlock()
+	}
+}
+
+func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
+	udphdr, payload := parseUdpHeader(packet)
+	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
+	sport := int(udphdr.SrcPort)
+	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
+	dport := int(udphdr.DstPort)
+	addr := net.UDPAddr{
+		IP: net.IP(iphdr.DstIP[:]),
+		Port: dport,
+	}
+	if src - 0x0a000200 != src & 0xff {
+		addr.IP = net.IP(iphdr.SrcIP[:])
+		addr.Port = sport
+		tmp := src
+		tport := sport
+		src = dst
+		sport = dport
+		dst = tmp
+		dport = tport
+	}
+	key := ConnKey{
+		SrcIP: src,
+		SrcPort: sport,
+		DstIP: dst,
+		DstPort: dport,
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	item, exists := cm.data[key]
+	if exists {
+		fmt.Fprintf(os.Stderr, "using exists key ...\r\n")
+		item.lastActivity = time.Now()
+	} else {
+		fmt.Fprintf(os.Stderr, "using new key ...\r\n")
+		udpConn, err := net.DialUDP("udp", nil, &addr)
+		if err != nil {
+			return key, item, udphdr, payload, fmt.Errorf("failed to dial UDP: %v", err)
+		}
+		item = &ConnVal{}
+		item.Type = 200
+		item.Key = &key
+		item.UDPcln = udpConn
+		item.lastActivity = time.Now()
+		item.done = make(chan bool)
+		fmt.Fprintf(os.Stderr, "item done: %v\r\n", item.done)
+		item.disposed = false
+		cm.data[key] = item
+		go item.handleUdpResponse(iphdr, udphdr)
+	}
+
+	_, err := item.UDPcln.Write(payload)
+	if err != nil {
+		return key, item, udphdr, payload, fmt.Errorf("failed to send UDP: %v", err)
+	}
+	return key, item, udphdr, payload, nil
+}
+
+
 // IP header structure (20 bytes minimum)
 type IPHeader struct {
 	VersionIHL     uint8
@@ -63,10 +263,18 @@ type UDPHeader struct {
 	Checksum uint16
 }
 
+var (
+	printMutex sync.Mutex
+	debugDumpMutex sync.Mutex
+	reader *bufio.Reader
+	writer *bufio.Writer
+)
+
 func main() {
-	reader := bufio.NewReader(os.Stdin)
-	writer := bufio.NewWriter(os.Stdout)
+	reader = bufio.NewReader(os.Stdin)
+	writer = bufio.NewWriter(os.Stdout)
 	defer writer.Flush()
+	cm := NewConnMap()
 
 	for {
 		packet, err := readSLIPPacket(reader)
@@ -91,7 +299,7 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[D] packet\r\n")
-		fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(packet), "\n", "\r\n"))
+		debugDumpPacket(packet)
 
 		ipHeader := parseIPHeader(packet)
 		fmt.Fprintf(os.Stderr, "[I] IP packet: src=%v dst=%v proto=%d\r\n",
@@ -101,7 +309,8 @@ func main() {
 		if (ipHeader.Protocol == 17) { // UDP
 			// TODO: using go to handle multiple responses
 			fmt.Fprintf(os.Stderr, "[I] Sending UDP response\r\n")
-			response, _ = processUdpPacket(&ipHeader, packet)
+			go cm.ProcessUDPConnection(ipHeader, packet)
+			continue
 		} else {
 			// Generate ICMP Host Unreachable response
 			fmt.Fprintf(os.Stderr, "[I] Sending ICMP Host Unreachable response\r\n")
@@ -109,17 +318,30 @@ func main() {
 		}
 
 		fmt.Fprintf(os.Stderr, "[D] response packet\r\n")
-		fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(response), "\n", "\r\n"))
+		debugDumpPacket(response)
 		// Encode and send response
 		encoded := encodeSLIP(response)
-		_, err = writer.Write(encoded)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[E] Error writing response: %v\r\n", err)
-			continue
-		}
-		writer.Flush()
-
+		go seqPrintPacket(encoded)
 		fmt.Fprintf(os.Stderr, "^ ==========\r\n")
+	}
+}
+
+func debugDumpPacket(data []byte) {
+	fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(data), "\n", "\r\n"))
+}
+
+func seqPrintPacket(data []byte) {
+	if writer == nil {
+		// it may meet when program is closing
+		return
+	}
+	printMutex.Lock()
+	defer printMutex.Unlock()
+	_, err := writer.Write(data)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[E] Error writing response: %v\r\n", err)
+	} else {
+		writer.Flush()
 	}
 }
 
@@ -279,6 +501,7 @@ func calculateChecksum(data []byte) uint16 {
 	return uint16(^sum)
 }
 
+/*
 func processUdpPacket(iphdr *IPHeader, packet []byte) ([]byte, error) {
 	// Parse the input packet
 	udphdr, payload := parseUdpHeader(packet)
@@ -331,6 +554,7 @@ func forwardUDP(dstIP [4]byte, dstPort uint16, payload []byte) ([]byte, error) {
 
 	return buffer[:n], nil
 }
+*/
 
 func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, responsePayload []byte) []byte {
 	// Calculate lengths

@@ -3,6 +3,20 @@
 
 Simple slirp implementation in golang for user mode Linux
 
+## version 0.0.3
+
+- use claude 4 (backup: gemini 2.5 pro)
+- manual integration
+- get ipv4 udp packet, relay to outside, keepalive to get more data if any
+
+```
+write a program in golang:
+- input is a sequence of ip packets with udp contents
+- maintain a map to identify source + destination, record the connection for reuse
+- for each packet, extract info, get connection in the map or create a new one, relay the payload and get reponse
+- generate ip packet for the response and print to stdout
+```
+
 ## version 0.0.2
 
 - use claude 4 (backup: gemini 2.5 pro)
