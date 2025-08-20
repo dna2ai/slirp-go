@@ -17,14 +17,16 @@ $ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
 $ route add default gw 10.0.2.2
 $ curl https://www.google.com
 ```
-## unknown issues
+## unknown issues and future work
 
-[ ] no dup recognition for tcp packet, `apt update` sometimes stuck, wait timeout and try times ok, the same for `apt install`
-[ ] no ipv6 support yet
-[ ] no server support yet
-[ ] - tcp server: SYN-ACK
-[ ] - udp server
-[ ] - route traffic by proxy mode for example socks5; then ensure `ALL_PROXY=socks5://... ssh root@10.0.2.15`
+- [ ] no dup recognition for tcp packet, `apt update` sometimes stuck, wait timeout and try times ok, the same for `apt install`
+- [ ] no ipv6 support yet
+- [ ] no server support yet
+- [ ] - tcp server: SYN-ACK
+- [ ] - udp server
+- [ ] - route traffic by proxy mode for example socks5; then ensure `ALL_PROXY=socks5://... ssh root@10.0.2.15`
+- [ ] refactor code into files instead of all-in-one file
+- [ ] add test
 
 
 ## version 0.0.5
