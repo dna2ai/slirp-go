@@ -357,6 +357,12 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
+	cv.lock.Lock()
+	if cv.state.clientSeq != tcphdr.SeqNum {
+		debugPrintf("[E] TCP invalid data packet %d <--> %d\r\n", cv.state.clientSeq, tcphdr.SeqNum)
+		return
+	}
+	cv.lock.Unlock()
 	debugPrintf("[I] Forwarding TCP packet to %s:%d - %d byte(s)\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, len(payload))
 	if cv.TCPcln == nil {
 		debugPrintf("[I] TCP predata RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)

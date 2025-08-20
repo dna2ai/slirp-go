@@ -15,11 +15,12 @@ Simple slirp implementation in golang for user mode Linux
 # before use proot to install inet-tools
 $ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
 $ route add default gw 10.0.2.2
+$ apt update
+$ apt install -y curl
 $ curl https://www.google.com
 ```
 ## unknown issues and future work
 
-- [ ] no dup recognition for tcp packet, `apt update` sometimes stuck, wait timeout and try times ok, the same for `apt install`
 - [ ] no ipv6 support yet
 - [ ] no server support yet
 - [ ] - tcp server: SYN-ACK
@@ -30,6 +31,14 @@ $ curl https://www.google.com
 
 
 ## version 0.0.5
+
+- send payload to outside, filter in valid data in a simple way
+
+```
+please write a function in golang:
+`checkTcpPacketDup(packetSeqNum, lastSeqNum, packetTcpPayloadLength)`;
+if missing info, please add more args
+```
 
 - get ipv4 tcp packet, get large response, send into a queue
 - send data fragment, receive ack, send next fragment
