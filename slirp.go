@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"net"
 	"fmt"
+	"flag"
 	"io"
 	"os"
 	"syscall"
@@ -46,7 +47,6 @@ const (
 	PROTO_ICMP = 1
 	PROTO_TCP  = 6
 	PROTO_UDP  = 17
-	MTU = 1500
 
 	// ICMP types
 	ICMP_ECHO_REQUEST = 8
@@ -158,8 +158,8 @@ func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
 			}
 			cv.lastActivity = time.Now()
 			response := buffer[:n]
-			fmt.Fprintf(os.Stderr, "[D] UDP response\r\n")
-			fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(response), "\n", "\r\n"))
+			debugPrintf("[D] UDP response\r\n")
+			debugDumpPacket(response)
 
 			// Construct response packet
 			ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
@@ -205,7 +205,7 @@ func (cm *ConnMap) cleanup() {
 			if item.IsTimeout(&now) {
 				item.Dispose()
 				delete(cm.data, key)
-				fmt.Fprintf(os.Stderr, "[D] Timeout connection: %+v\r\n", key)
+				debugPrintf("[D] Timeout connection: %+v\r\n", key)
 			}
 		}
 		cm.mu.Unlock()
@@ -242,10 +242,10 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	defer cm.mu.Unlock()
 	item, exists := cm.data[key]
 	if exists {
-		fmt.Fprintf(os.Stderr, "tcp: using exists key ...\r\n")
+		debugPrintf("tcp: using exists key ...\r\n")
 		item.lastActivity = time.Now()
 	} else {
-		fmt.Fprintf(os.Stderr, "tcp: using new key ...\r\n")
+		debugPrintf("tcp: using new key ...\r\n")
 		item = &ConnVal{}
 		item.Type = 100
 		item.Key = &key
@@ -257,7 +257,7 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		cm.data[key] = item
 	}
 	payloadN := len(payload)
-	fmt.Fprintf(os.Stderr, "[I] TCP header: %+v\r\n", tcphdr)
+	debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
 	switch (item.state.value) {
 	case TcpStateClosed:
 		if tcphdr.Flags & SYN != 0 {
@@ -298,7 +298,7 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 				}
 				cv.lock.Unlock()
 			} else {
-				fmt.Fprintf(os.Stderr, "[I] TCP read RST packet to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
+				debugPrintf("[I] TCP read RST packet to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
 				cv.Dispose()
 				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 				encoded := encodeSLIP(ret)
@@ -329,7 +329,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inBusy = true
 	ipHeaderLen := int(iphdr.VersionIHL & 0x0f) * 4
 	tcpHeaderLen := 20
-	maxPayloadSize := MTU - ipHeaderLen - tcpHeaderLen
+	maxPayloadSize := config.MTU - ipHeaderLen - tcpHeaderLen
 	firstElem := cv.state.inQ.Front()
 	data := firstElem.Value.([]byte)
 	n := len(data)
@@ -348,7 +348,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		return
 	}
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, PSH|ACK, 65535, 0, data)
-	fmt.Fprintf(os.Stderr, "[I] forward slice read (+%d -> %d)/%d | %d ...\r\n", L, cv.state.inOffset, n, cv.state.inQ.Len())
+	debugPrintf("[I] forward slice read (+%d -> %d)/%d | %d ...\r\n", L, cv.state.inOffset, n, cv.state.inQ.Len())
 	debugDumpPacket(ret)
 	cv.state.serverSeq += uint32(L)
 	cv.lastActivity = time.Now()
@@ -357,9 +357,9 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
-	fmt.Fprintf(os.Stderr, "[I] Forwarding TCP packet to %s:%d - %d byte(s)\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, len(payload))
+	debugPrintf("[I] Forwarding TCP packet to %s:%d - %d byte(s)\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, len(payload))
 	if cv.TCPcln == nil {
-		fmt.Fprintf(os.Stderr, "[I] TCP predata RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		debugPrintf("[I] TCP predata RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 		encoded := encodeSLIP(ret)
 		go seqPrintPacket(encoded)
@@ -367,7 +367,7 @@ func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload 
 	}
 	_, err := cv.TCPcln.Write(payload)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[I] TCP data RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		debugPrintf("[I] TCP data RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 		encoded := encodeSLIP(ret)
 		go seqPrintPacket(encoded)
@@ -383,10 +383,10 @@ func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload 
 }
 
 func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
-	fmt.Fprintf(os.Stderr, "[I] TCP SYN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	debugPrintf("[I] TCP SYN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", net.IP(iphdr.DstIP[:]), tcphdr.DstPort), 5*time.Second)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[I] TCP ACK-RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		debugPrintf("[I] TCP ACK-RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 		ret := GenerateIpTcpPacket(iphdr, tcphdr, 0, tcphdr.SeqNum, ACK|RST, 0, 0, nil)
 		encoded := encodeSLIP(ret)
 		go seqPrintPacket(encoded)
@@ -410,7 +410,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
-	fmt.Fprintf(os.Stderr, "[I] TCP ACK packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	debugPrintf("[I] TCP ACK packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
 	cv.state.clientSeq = tcphdr.SeqNum
@@ -424,7 +424,7 @@ func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
-	fmt.Fprintf(os.Stderr, "[I] TCP FIN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	debugPrintf("[I] TCP FIN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
 	cv.state.value = TcpStateFinWait1
@@ -438,7 +438,7 @@ func (cv *ConnVal) HandleTcpClnFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
-	fmt.Fprintf(os.Stderr, "[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	debugPrintf("[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
 	//cv.state.value = TcpStateClosing
@@ -451,7 +451,7 @@ func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
 }
 
 func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
-	fmt.Fprintf(os.Stderr, "[I] TCP RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	debugPrintf("[I] TCP RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
 	if cv.TCPcln != nil {
@@ -493,10 +493,10 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	defer cm.mu.Unlock()
 	item, exists := cm.data[key]
 	if exists {
-		fmt.Fprintf(os.Stderr, "udp: using exists key ...\r\n")
+		debugPrintf("udp: using exists key ...\r\n")
 		item.lastActivity = time.Now()
 	} else {
-		fmt.Fprintf(os.Stderr, "udp: using new key ...\r\n")
+		debugPrintf("udp: using new key ...\r\n")
 		udpConn, err := net.DialUDP("udp", nil, &addr)
 		if err != nil {
 			return key, item, udphdr, payload, fmt.Errorf("failed to dial UDP: %v", err)
@@ -512,7 +512,7 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		go item.handleUdpResponse(iphdr, udphdr)
 	}
 
-	fmt.Fprintf(os.Stderr, "[I] Forwarding UDP packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), udphdr.DstPort)
+	debugPrintf("[I] Forwarding UDP packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), udphdr.DstPort)
 	_, err := item.UDPcln.Write(payload)
 	if err != nil {
 		return key, item, udphdr, payload, fmt.Errorf("failed to send UDP: %v", err)
@@ -564,11 +564,17 @@ type UDPHeader struct {
 	Checksum uint16
 }
 
+type SlirpConfig struct {
+	Debug bool
+	MTU   int
+}
+
 var (
 	printMutex sync.Mutex
 	debugDumpMutex sync.Mutex
 	reader *bufio.Reader
 	writer *bufio.Writer
+	config *SlirpConfig
 )
 
 func main() {
@@ -577,13 +583,24 @@ func main() {
 	defer writer.Flush()
 	cm := NewConnMap()
 
+	config = &SlirpConfig{}
+	flag.BoolVar(&config.Debug, "debug", false, "Enable debug info")
+	flag.IntVar(&config.MTU, "mtu", 1500, "Set MTU value")
+	flag.Parse()
+
+	infoPrintf("- guest network address: 10.0.2.15\r\n")
+	infoPrintf("-      gateway address: 10.0.2.2\r\n")
+	infoPrintf("# run commands to config network:\r\n")
+	infoPrintf("$ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up\r\n")
+	infoPrintf("$ route add default gw 10.0.2.2\r\n")
+
 	for {
 		packet, err := readSLIPPacket(reader)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			fmt.Fprintf(os.Stderr, "[E] Error reading SLIP packet: %v\r\n", err)
+			infoPrintf("[E] Error reading SLIP packet: %v\r\n", err)
 			continue
 		}
 
@@ -591,46 +608,46 @@ func main() {
 			continue
 		}
 
-		fmt.Fprintf(os.Stderr, "[I] Received packet of %d bytes\r\n", len(packet))
+		debugPrintf("[I] Received packet of %d bytes\r\n", len(packet))
 
 		// Parse IP header
 		if len(packet) < 20 {
-			fmt.Fprintf(os.Stderr, "[E] Packet too small for IP header\r\n")
+			debugPrintf("[E] Packet too small for IP header\r\n")
 			continue
 		}
 
-		fmt.Fprintf(os.Stderr, "[D] packet\r\n")
+		debugPrintf("[D] packet\r\n")
 		debugDumpPacket(packet)
 
 		ipHeader := parseIPHeader(packet)
-		fmt.Fprintf(os.Stderr, "[I] IP packet: src=%v dst=%v proto=%d\r\n",
+		debugPrintf("[I] IP packet: src=%v dst=%v proto=%d\r\n",
 			ipHeader.SrcIP, ipHeader.DstIP, ipHeader.Protocol)
 
 		var response []byte
 		if (ipHeader.Protocol == 6) { // TCP
-			fmt.Fprintf(os.Stderr, "[I] Sending TCP response\r\n")
+			debugPrintf("[I] Sending TCP response\r\n")
 			go cm.ProcessTCPConnection(ipHeader, packet)
 			continue
 		} else if (ipHeader.Protocol == 17) { // UDP
-			fmt.Fprintf(os.Stderr, "[I] Sending UDP response\r\n")
+			debugPrintf("[I] Sending UDP response\r\n")
 			go cm.ProcessUDPConnection(ipHeader, packet)
 			continue
 		} else if (ipHeader.Protocol == 1) { // ICMP
-			fmt.Fprintf(os.Stderr, "[I] Sending ICMP response\r\n")
+			debugPrintf("[I] Sending ICMP response\r\n")
 			response, err = processICMPPacket(ipHeader, packet)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[E] error: %s\r\n", err)
+				infoPrintf("[E] error: %s\r\n", err)
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "[D] icmp response packet\r\n")
+			debugPrintf("[D] icmp response packet\r\n")
 			debugDumpPacket(response)
 			encoded := encodeSLIP(response)
 			go seqPrintPacket(encoded)
 		} else {
 			// Generate ICMP Host Unreachable response
-			fmt.Fprintf(os.Stderr, "[I] Sending ICMP Host Unreachable response\r\n")
+			debugPrintf("[I] Sending ICMP Host Unreachable response\r\n")
 			response = generateICMPHostUnreachable(ipHeader, packet)
-			fmt.Fprintf(os.Stderr, "[D] response packet\r\n")
+			debugPrintf("[D] response packet\r\n")
 			debugDumpPacket(response)
 			// Encode and send response
 			encoded := encodeSLIP(response)
@@ -640,7 +657,19 @@ func main() {
 }
 
 func debugDumpPacket(data []byte) {
-	fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(data), "\n", "\r\n"))
+	if config.Debug {
+		fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(data), "\n", "\r\n"))
+	}
+}
+
+func debugPrintf(format string, args ...interface{}) {
+	if config.Debug {
+		fmt.Fprintf(os.Stderr, format, args...)
+	}
+}
+
+func infoPrintf(format string, args ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, args...)
 }
 
 func seqPrintPacket(data []byte) {
@@ -652,7 +681,7 @@ func seqPrintPacket(data []byte) {
 	defer printMutex.Unlock()
 	_, err := writer.Write(data)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[E] Error writing response: %v\r\n", err)
+		infoPrintf("[E] Error writing response: %v\r\n", err)
 	} else {
 		writer.Flush()
 	}
@@ -824,7 +853,7 @@ func processICMPPacket(iphdr IPHeader, packet []byte) ([]byte, error) {
 	case ICMP_ECHO_REQUEST:
 		dstIPuint32 := binary.BigEndian.Uint32(iphdr.DstIP[:])
 		if dstIPuint32 - 0x0a000200 == dstIPuint32 & 0xff {
-			fmt.Fprintf(os.Stderr, "[D] ping intranet at 10.0.2.%d\r\n", dstIPuint32 & 0xff)
+			debugPrintf("[D] ping intranet at 10.0.2.%d\r\n", dstIPuint32 & 0xff)
 			responseICMP :=packet[ipHeaderLen:]
 			// heal icmp cmd type
 			responseICMP[0] = ICMP_ECHO_REPLY
@@ -880,9 +909,9 @@ func forwardICMPRequest(iphdr *IPHeader, icmpHeader *ICMPHeader, payload []byte)
 	}
 
 	// Read the response
-	responseBuf := make([]byte, 65536) // Max MTU size
+	responseBuf := make([]byte, 65536)
 	n, peer, err := syscall.Recvfrom(fd, responseBuf, 0)
-	fmt.Fprintf(os.Stderr, "Received %d bytes from %s\r\n", n, peer)
+	debugPrintf("Received %d bytes from %s\r\n", n, peer)
 	if err != nil {
 		if nerr, ok := err.(syscall.Errno); ok && nerr == syscall.EAGAIN {
 			return nil, fmt.Errorf("failed to read ICMP timeout: %v", err)
