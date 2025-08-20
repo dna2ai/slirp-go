@@ -3,6 +3,27 @@
 
 Simple slirp implementation in golang for user mode Linux
 
+## version 0.0.4
+
+- use claude 4 (backup: gemini 2.5 pro)
+- manual integraion
+- get ipv4 icmp packet, relay to outside
+- get ipv4 icmp packet, if intranet, send ok directly
+
+```
+write a program in golang:
+- input is an ip packet with icmp contents
+- extract info from the packet, create ping connection without root, relay the payload and get response
+- generate an ip packet for the response and print to stdout
+- using built-in package for example syscall
+```
+
+```
+write a program in golang:
+- input is an ip packet with icmp contents
+- generate an ip packet for icmp response with ok message
+```
+
 ## version 0.0.3
 
 - use claude 4 (backup: gemini 2.5 pro)
