@@ -3,6 +3,30 @@
 
 Simple slirp implementation in golang for user mode Linux
 
+## how to use
+
+- download linux kernel source code, extract and `ARCH=um make menuconfig` + `ARCH=um make` to get `linux`
+- `go build -o slirp slirp.go`
+- `linux udba=./rootfs.img root=/dev/udba rw init=/bin/bash eth0=slirp,,/path/to/slirp,-debug`
+- in the user mode linux
+
+```
+# example of ubuntu rootfs
+# before use proot to install inet-tools
+$ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up
+$ route add default gw 10.0.2.2
+$ curl https://www.google.com
+```
+## unknown issues
+
+[ ] no dup recognition for tcp packet, `apt update` sometimes stuck, wait timeout and try times ok, the same for `apt install`
+[ ] no ipv6 support yet
+[ ] no server support yet
+[ ] - tcp server: SYN-ACK
+[ ] - udp server
+[ ] - route traffic by proxy mode for example socks5; then ensure `ALL_PROXY=socks5://... ssh root@10.0.2.15`
+
+
 ## version 0.0.5
 
 - get ipv4 tcp packet, get large response, send into a queue
