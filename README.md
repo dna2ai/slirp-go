@@ -3,6 +3,25 @@
 
 Simple slirp implementation in golang for user mode Linux
 
+## version 0.0.5
+
+- use claude 4 (backup: gemini 2.5 pro)
+- manual integraion
+- get ipv4 tcp packet, relay to outside and get response without fragments
+
+```
+write a program in golang:
+- input is a sequence of ip packets with tcp contents
+- use map for tcp state machine to handle packets correctly including SYN, ACK, FIN, ...
+```
+
+```
+write a program in golang:
+- open a tcp connection with "net" package
+- send payload directly without "http" package
+- get response and print to stdout
+```
+
 ## version 0.0.4
 
 - use claude 4 (backup: gemini 2.5 pro)

@@ -14,6 +14,27 @@ import (
 	"time"
 )
 
+// TCP flags
+const (
+    FIN = 0x01
+    SYN = 0x02
+    RST = 0x04
+    PSH = 0x08
+    ACK = 0x10
+    URG = 0x20
+)
+
+// Connection states
+const (
+    TcpStateInit = iota
+    TcpStateSynReceived
+    TcpStateEstablished
+    TcpStateFinWait1
+    TcpStateFinWait2
+    TcpStateClosing
+    TcpStateClosed
+)
+
 const (
 	SLIP_END     = 0xC0
 	SLIP_ESC     = 0xDB
@@ -55,6 +76,9 @@ type ConnVal struct {
 	container *ConnMap
 	lock sync.Mutex
 	disposed bool
+	clientSeq    uint32
+	serverSeq    uint32
+	state        int
 }
 
 func (cv *ConnVal) IsTimeout(now *time.Time) bool {
@@ -176,17 +200,17 @@ func (cm *ConnMap) cleanup() {
 	}
 }
 
-func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
-	udphdr, payload := parseUdpHeader(packet)
+func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, TCPHeader, []byte, error) {
+	tcphdr, payload := parseTCPHeader(packet)
 	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
-	sport := int(udphdr.SrcPort)
+	sport := int(tcphdr.SrcPort)
 	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
-	dport := int(udphdr.DstPort)
+	dport := int(tcphdr.DstPort)
 	addr := net.UDPAddr{
 		IP: net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
-	if src - 0x0a000200 != src & 0xff {
+	if (src & 0xffffff00) == 0x0a000200 {
 		addr.IP = net.IP(iphdr.SrcIP[:])
 		addr.Port = sport
 		tmp := src
@@ -206,10 +230,214 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	defer cm.mu.Unlock()
 	item, exists := cm.data[key]
 	if exists {
-		fmt.Fprintf(os.Stderr, "using exists key ...\r\n")
+		fmt.Fprintf(os.Stderr, "tcp: using exists key ...\r\n")
 		item.lastActivity = time.Now()
 	} else {
-		fmt.Fprintf(os.Stderr, "using new key ...\r\n")
+		fmt.Fprintf(os.Stderr, "tcp: using new key ...\r\n")
+		item = &ConnVal{}
+		item.Type = 100
+		item.Key = &key
+		item.lastActivity = time.Now()
+		item.done = make(chan bool)
+		item.state = TcpStateClosed
+		item.disposed = false
+		cm.data[key] = item
+	}
+	payloadN := len(payload)
+	fmt.Fprintf(os.Stderr, "[I] TCP header: %+v\r\n", tcphdr)
+	switch (item.state) {
+	case TcpStateClosed:
+		if tcphdr.Flags & SYN != 0 {
+			item.HandleTcpClnSYN(&iphdr, &tcphdr)
+		}
+	case TcpStateInit:
+		if tcphdr.Flags & ACK != 0 {
+			item.HandleTcpClnACK(&iphdr, &tcphdr)
+		} // -> server: TcpStateSynReceived, client: TcpStateEstablished
+	case TcpStateEstablished:
+		if payloadN > 0 {
+			item.HandleTcpClnData(&iphdr, &tcphdr, payload)
+		} else if tcphdr.Flags & FIN != 0 {
+			item.HandleTcpClnFIN(&iphdr, &tcphdr)
+		} else if tcphdr.Flags & ACK != 0 {
+			item.HandleTcpClnACK(&iphdr, &tcphdr)
+		}
+	case TcpStateFinWait1:
+		// FIN, server: TcpStateFinWait2
+		item.HandleTcpClnFIN2(&iphdr, &tcphdr)
+		// -> TcpStateClosed
+	}
+	return key, item, tcphdr, payload, nil
+}
+
+func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
+	buffer := make([]byte, 65535)
+	for {
+		if cv.TCPcln == nil {
+			return
+		}
+		// TODO: split into fragments
+		n, err := cv.TCPcln.Read(buffer)
+		if err != nil {
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "[I] TCP read RST packet to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
+				cv.Dispose()
+				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, RST, 65535, nil)
+				encoded := encodeSLIP(ret)
+				go seqPrintPacket(encoded)
+			}
+			return
+		}
+		if n > 0 {
+			cv.lock.Lock()
+			fmt.Fprintf(os.Stderr, "[I] Reading TCP packet to %s:%d - %d byte(s)\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, n)
+			ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, PSH|ACK, 65535, buffer[:n])
+			fmt.Fprintf(os.Stderr, "[I] forward read ...\r\n")
+			debugDumpPacket(ret)
+			cv.serverSeq += uint32(len(ret))
+			cv.lastActivity = time.Now()
+			encoded := encodeSLIP(ret)
+			go seqPrintPacket(encoded)
+			cv.lock.Unlock()
+		}
+	}
+}
+
+func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
+	fmt.Fprintf(os.Stderr, "[I] Forwarding TCP packet to %s:%d - %d byte(s)\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, len(payload))
+	if cv.TCPcln == nil {
+		fmt.Fprintf(os.Stderr, "[I] TCP predata RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, RST, 65535, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		return
+	}
+	_, err := cv.TCPcln.Write(payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[I] TCP data RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, RST, 65535, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		return
+	}
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	cv.clientSeq = tcphdr.SeqNum + uint32(len(payload))
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, ACK, 65535, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+	cv.lastActivity = time.Now()
+}
+
+func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
+	fmt.Fprintf(os.Stderr, "[I] TCP SYN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", net.IP(iphdr.DstIP[:]), tcphdr.DstPort), 5*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[I] TCP ACK-RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, 0, tcphdr.SeqNum, ACK|RST, 0, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		return
+	}
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	cv.TCPcln, _ = conn.(*net.TCPConn)
+	cv.state = TcpStateInit
+	cv.clientSeq = tcphdr.SeqNum + 1
+	cv.serverSeq = 1000
+	cv.lastActivity = time.Now()
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, ACK|SYN, 65535, nil)
+        cv.serverSeq ++
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+	go cv.handleTcpResponse(iphdr, tcphdr)
+}
+
+func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
+	fmt.Fprintf(os.Stderr, "[I] TCP ACK packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	cv.clientSeq = tcphdr.SeqNum
+	cv.serverSeq = tcphdr.AckNum
+	if cv.state == TcpStateInit {
+		cv.state = TcpStateEstablished
+	}
+}
+
+func (cv *ConnVal) HandleTcpClnFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
+	fmt.Fprintf(os.Stderr, "[I] TCP FIN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	cv.state = TcpStateFinWait1
+	cv.clientSeq = tcphdr.SeqNum + 1
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, ACK, 65535, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+	if cv.TCPcln != nil {
+		cv.TCPcln.Close()
+	}
+}
+
+func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
+	fmt.Fprintf(os.Stderr, "[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	//cv.state = TcpStateClosing
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, ACK|FIN, 65535, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+	cv.serverSeq ++
+	cv.state = TcpStateClosed
+	// TODO: remove from cm
+}
+
+func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
+	fmt.Fprintf(os.Stderr, "[I] TCP RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	if cv.TCPcln != nil {
+		cv.TCPcln.Close()
+	}
+	cv.state = TcpStateClosed
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.serverSeq, cv.clientSeq, RST, 65535, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+}
+
+func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
+	udphdr, payload := parseUdpHeader(packet)
+	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
+	sport := int(udphdr.SrcPort)
+	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
+	dport := int(udphdr.DstPort)
+	addr := net.UDPAddr{
+		IP: net.IP(iphdr.DstIP[:]),
+		Port: dport,
+	}
+	if (src & 0xffffff00) == 0x0a000200 {
+		addr.IP = net.IP(iphdr.SrcIP[:])
+		addr.Port = sport
+		tmp := src
+		tport := sport
+		src = dst
+		sport = dport
+		dst = tmp
+		dport = tport
+	}
+	key := ConnKey{
+		SrcIP: src,
+		SrcPort: sport,
+		DstIP: dst,
+		DstPort: dport,
+	}
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	item, exists := cm.data[key]
+	if exists {
+		fmt.Fprintf(os.Stderr, "udp: using exists key ...\r\n")
+		item.lastActivity = time.Now()
+	} else {
+		fmt.Fprintf(os.Stderr, "udp: using new key ...\r\n")
 		udpConn, err := net.DialUDP("udp", nil, &addr)
 		if err != nil {
 			return key, item, udphdr, payload, fmt.Errorf("failed to dial UDP: %v", err)
@@ -220,7 +448,6 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		item.UDPcln = udpConn
 		item.lastActivity = time.Now()
 		item.done = make(chan bool)
-		fmt.Fprintf(os.Stderr, "item done: %v\r\n", item.done)
 		item.disposed = false
 		cm.data[key] = item
 		go item.handleUdpResponse(iphdr, udphdr)
@@ -255,6 +482,19 @@ type ICMPHeader struct {
 	Code     uint8
 	Checksum uint16
 	Unused   uint32
+}
+
+// TCPHeader represents a TCP header
+type TCPHeader struct {
+	SrcPort    uint16
+	DstPort    uint16
+	SeqNum     uint32
+	AckNum     uint32
+	DataOffset uint8
+	Flags      uint8
+	Window     uint16
+	Checksum   uint16
+	Urgent     uint16
 }
 
 // UDPHeader represents a UDP header
@@ -308,7 +548,11 @@ func main() {
 			ipHeader.SrcIP, ipHeader.DstIP, ipHeader.Protocol)
 
 		var response []byte
-		if (ipHeader.Protocol == 17) { // UDP
+		if (ipHeader.Protocol == 6) { // TCP
+			fmt.Fprintf(os.Stderr, "[I] Sending TCP response\r\n")
+			go cm.ProcessTCPConnection(ipHeader, packet)
+			continue
+		} else if (ipHeader.Protocol == 17) { // UDP
 			fmt.Fprintf(os.Stderr, "[I] Sending UDP response\r\n")
 			go cm.ProcessUDPConnection(ipHeader, packet)
 			continue
@@ -429,13 +673,28 @@ func parseIPHeader(packet []byte) IPHeader {
 	return header
 }
 
+func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
+	// VersionIHL = packet[0]
+	i := int(packet[0] & 0x0f) * 4
+	var header TCPHeader
+	header.SrcPort = binary.BigEndian.Uint16(packet[i : i+2])
+	header.DstPort = binary.BigEndian.Uint16(packet[i+2 : i+4])
+	header.SeqNum = binary.BigEndian.Uint32(packet[i+4 : i+8])
+	header.AckNum = binary.BigEndian.Uint32(packet[i+8 : i+12])
+	header.DataOffset = packet[i+12] >> 4
+	header.Flags = packet[i+13]
+	header.Window = binary.BigEndian.Uint16(packet[i+14 : i+16])
+	header.Checksum = binary.BigEndian.Uint16(packet[i+16 : i+18])
+	header.Urgent = binary.BigEndian.Uint16(packet[i+18 : i+20])
+
+	return header, packet[i+20:]
+}
+
 func parseUdpHeader(packet []byte) (UDPHeader, []byte) {
 	var header UDPHeader
 	header.SrcPort = 0
 	header.DstPort = 0
-	if packet[9] != 17 {
-		return header, nil
-	}
+	// VersionIHL = packet[0]
 	i := int(packet[0] & 0x0f) * 4
 	header.SrcPort = binary.BigEndian.Uint16(packet[i:i+2])
 	header.DstPort = binary.BigEndian.Uint16(packet[i+2:i+4])
@@ -656,6 +915,59 @@ func calculateChecksum(data []byte) uint16 {
 	return uint16(^sum)
 }
 
+func calculateSubChecksum(srcIP [4]byte, dstIP [4]byte, protocol uint8, data []byte) uint16 {
+	pseudoHeader := make([]byte, 12)
+	copy(pseudoHeader[0:4], srcIP[:])
+	copy(pseudoHeader[4:8], dstIP[:])
+	pseudoHeader[8] = 0
+	pseudoHeader[9] = protocol
+	binary.BigEndian.PutUint16(pseudoHeader[10:12], uint16(len(data)))
+	return calculateChecksum(append(pseudoHeader, data...))
+}
+
+func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNum, ackNum uint32, flags uint8, window uint16, responsePayload []byte) []byte {
+	// IP header
+	ipHeader := make([]byte, 20)
+	ipHeader[0] = 0x45 // Version 4, IHL 5
+	ipHeader[1] = 0    // TOS
+	totalLen := 20 + 20 + len(responsePayload) // IP + TCP + payload
+	binary.BigEndian.PutUint16(ipHeader[2:4], uint16(totalLen))
+	binary.BigEndian.PutUint16(ipHeader[4:6], 0) // ID
+	ipHeader[6] = 0x40 // Don't fragment
+	ipHeader[8] = 64   // TTL
+	ipHeader[9] = 6    // TCP protocol
+	binary.BigEndian.PutUint16(ipHeader[10:12], 0) // checksume placeholder
+	copy(ipHeader[12:16], origIPHeader.DstIP[:])
+	copy(ipHeader[16:20], origIPHeader.SrcIP[:])
+
+	// Calculate IP checksum
+	checksum := calculateChecksum(ipHeader)
+	binary.BigEndian.PutUint16(ipHeader[10:12], checksum)
+
+	// TCP header
+	tcpHeader := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcpHeader[0:2], origTCPHeader.DstPort)
+	binary.BigEndian.PutUint16(tcpHeader[2:4], origTCPHeader.SrcPort)
+	binary.BigEndian.PutUint32(tcpHeader[4:8], seqNum)
+	binary.BigEndian.PutUint32(tcpHeader[8:12], ackNum)
+	tcpHeader[12] = 0x50 // Data offset (5 * 4 = 20 bytes)
+	tcpHeader[13] = flags
+	binary.BigEndian.PutUint16(tcpHeader[14:16], window)
+
+	// Combine TCP header and payload
+	tcpData := tcpHeader
+	if responsePayload != nil {
+		tcpData = append(tcpData, responsePayload...)
+	}
+
+	// Calculate TCP checksum
+	tcpChecksum := calculateSubChecksum(origIPHeader.DstIP, origIPHeader.SrcIP, 6, tcpData)
+	binary.BigEndian.PutUint16(tcpData[16:18], tcpChecksum)
+
+	// Combine IP header and TCP data
+	return append(ipHeader, tcpData...)
+}
+
 func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, responsePayload []byte) []byte {
 	// Calculate lengths
 	udpLength := UDP_HEADER_LEN + len(responsePayload)
@@ -688,17 +1000,32 @@ func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, respo
 	copy(packet[udpStart+UDP_HEADER_LEN:], responsePayload)
 
 	// Calculate UDP checksum
-	pseudoHeader := make([]byte, 12)
-	copy(pseudoHeader[0:4], origIPHeader.DstIP[:])
-	copy(pseudoHeader[4:8], origIPHeader.SrcIP[:])
-	pseudoHeader[8] = 0
-	pseudoHeader[9] = 17
-	binary.BigEndian.PutUint16(pseudoHeader[10:12], uint16(udpLength))
-	udpChecksum := calculateChecksum(append(pseudoHeader, packet[udpStart:]...))
+	udpChecksum := calculateSubChecksum(origIPHeader.DstIP, origIPHeader.SrcIP, 17, packet[udpStart:])
 	binary.BigEndian.PutUint16(packet[udpStart+6:udpStart+8], udpChecksum)
 	// Calculate IP checksum
 	ipChecksum := calculateChecksum(packet[:ipHeaderLen])
 	binary.BigEndian.PutUint16(packet[10:12], ipChecksum)
 
 	return packet
+}
+
+func getTcpStateName(state int) string {
+    switch state {
+    case TcpStateInit:
+        return "INIT"
+    case TcpStateSynReceived:
+        return "SYN_RECEIVED"
+    case TcpStateEstablished:
+        return "ESTABLISHED"
+    case TcpStateFinWait1:
+        return "FIN_WAIT_1"
+    case TcpStateFinWait2:
+        return "FIN_WAIT_2"
+    case TcpStateClosing:
+        return "CLOSING"
+    case TcpStateClosed:
+        return "CLOSED"
+    default:
+        return "UNKNOWN"
+    }
 }
