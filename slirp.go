@@ -289,7 +289,6 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		if cv.TCPcln == nil {
 			return
 		}
-		// TODO: split into fragments
 		n, err := cv.TCPcln.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
@@ -344,8 +343,12 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		data = data[cv.state.inOffset:cv.state.inOffset+L]
 		cv.state.inOffset += L
 	}
+	if L == 0 {
+		cv.state.inBusy = false
+		return
+	}
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, PSH|ACK, 65535, 0, data)
-	fmt.Fprintf(os.Stderr, "[I] forward slice read %d/%d ...\r\n", L, n)
+	fmt.Fprintf(os.Stderr, "[I] forward slice read (+%d -> %d)/%d | %d ...\r\n", L, cv.state.inOffset, n, cv.state.inQ.Len())
 	debugDumpPacket(ret)
 	cv.state.serverSeq += uint32(L)
 	cv.lastActivity = time.Now()
