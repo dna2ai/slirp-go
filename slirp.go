@@ -145,9 +145,11 @@ func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
 			return
 		default:
 			// Read response
+			cv.lock.Lock()
 			cv.UDPcln.SetReadDeadline(time.Now().Add(1 * time.Second))
 			n, err := cv.UDPcln.Read(buffer)
 			if err != nil {
+				cv.lock.Unlock()
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
@@ -163,6 +165,7 @@ func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
 			ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
 			encoded := encodeSLIP(ret)
 			go seqPrintPacket(encoded)
+			cv.lock.Unlock()
 		}
 	}
 }
@@ -219,7 +222,7 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		IP: net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
-	if (src & 0xffffff00) == 0x0a000200 {
+	if (src & 0xffffff00) != 0x0a000200 {
 		addr.IP = net.IP(iphdr.SrcIP[:])
 		addr.Port = sport
 		tmp := src
@@ -467,7 +470,7 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		IP: net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
-	if (src & 0xffffff00) == 0x0a000200 {
+	if (src & 0xffffff00) != 0x0a000200 {
 		addr.IP = net.IP(iphdr.SrcIP[:])
 		addr.Port = sport
 		tmp := src
