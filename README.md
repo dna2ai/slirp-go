@@ -5,9 +5,27 @@ Simple slirp implementation in golang for user mode Linux
 
 ## version 0.0.5
 
+- get ipv4 tcp packet, get large response, send into a queue
+- send data fragment, receive ack, send next fragment
+
+```
+write a function in golang to implement `fill(out, data, iseof)`:
+- data is binary payload
+- out is an array of binary data
+- if not iseof, append data to last item of out
+- if iseof, create a new item in out and append data
+```
+
+```
+write a function in golang:
+- split large data into fragments
+- generate ip packet to wrap the tcp fragments
+```
+
 - use claude 4 (backup: gemini 2.5 pro)
 - manual integraion
 - get ipv4 tcp packet, relay to outside and get response without fragments
+- use gpt5-high to debug tcp connection problem (claude4 and gemini 2.5 pro get always wrong answer)
 
 ```
 write a program in golang:
@@ -20,6 +38,15 @@ write a program in golang:
 - open a tcp connection with "net" package
 - send payload directly without "http" package
 - get response and print to stdout
+```
+
+```
+# gpt5-high
+<paste code of HandleTcpClnSYN, HandleTcpClnACK and some more code>
+above is the code to process ip packet for tcp connection in user mode linux,
+but use this code with curl, it always reports:
+`curl: (1) Received HTTP/0.9 when not allowed`
+how to fix this bug?
 ```
 
 ## version 0.0.4
