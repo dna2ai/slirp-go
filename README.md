@@ -32,6 +32,13 @@ $ curl https://www.google.com
 
 ## version 0.0.5
 
+- improvements by Bytedance Doubao
+
+```
+please read slirp.go and understand how it can interact with user mode linux;
+fix bugs for tcp relay processing.
+```
+
 - send payload to outside, filter in valid data in a simple way
 
 ```

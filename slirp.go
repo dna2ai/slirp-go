@@ -14,6 +14,7 @@ import (
 	"sync"
 	"strings"
 	"time"
+	"math/rand"
 )
 
 // TCP flags
@@ -88,6 +89,12 @@ type TcpState struct {
 	inQ       *list.List
 	inOffset  int
 	inBusy    bool
+	retransmitQueue []struct {
+		data   []byte
+		seq    uint32
+		sentAt time.Time
+	}
+	retransmitTicker *time.Ticker
 }
 
 func (cv *ConnVal) IsTimeout(now *time.Time) bool {
@@ -329,7 +336,17 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inBusy = true
 	ipHeaderLen := int(iphdr.VersionIHL & 0x0f) * 4
 	tcpHeaderLen := 20
-	maxPayloadSize := config.MTU - ipHeaderLen - tcpHeaderLen
+	maxPayloadByMTU := config.MTU - ipHeaderLen - tcpHeaderLen
+	maxPayloadByWindow := int(tcphdr.Window)
+	maxPayloadSize := maxPayloadByMTU
+	if maxPayloadByWindow < maxPayloadSize {
+		maxPayloadSize = maxPayloadByWindow
+	}
+	if maxPayloadSize <= 0 {
+		// wait for window available
+		cv.state.inBusy = false
+		return
+	}
 	firstElem := cv.state.inQ.Front()
 	data := firstElem.Value.([]byte)
 	n := len(data)
@@ -403,7 +420,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.TCPcln, _ = conn.(*net.TCPConn)
 	cv.state.value = TcpStateInit
 	cv.state.clientSeq = tcphdr.SeqNum + 1
-	cv.state.serverSeq = 1000
+	cv.state.serverSeq = rand.Uint32()
 	cv.state.inQ = list.New()
 	cv.state.inOffset = 0
 	cv.state.inBusy = false
