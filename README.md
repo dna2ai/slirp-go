@@ -6,7 +6,7 @@ Simple slirp implementation in golang for user mode Linux
 ## how to use
 
 - download linux kernel source code, extract and `ARCH=um make menuconfig` + `ARCH=um make` to get `linux`
-- `go build -o slirp slirp.go`
+- `go build -o slirp main.go`
 - `linux udba=./rootfs.img root=/dev/udba rw init=/bin/bash eth0=slirp,,/path/to/slirp,-debug`
 - in the user mode linux
 
