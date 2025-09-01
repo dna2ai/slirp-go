@@ -2,9 +2,9 @@ package slirp
 
 import (
 	"encoding/binary"
+	"fmt"
 	"net"
 	"time"
-	"fmt"
 )
 
 func parseUdpHeader(packet []byte) (UDPHeader, []byte) {
@@ -12,18 +12,18 @@ func parseUdpHeader(packet []byte) (UDPHeader, []byte) {
 	header.SrcPort = 0
 	header.DstPort = 0
 	// VersionIHL = packet[0]
-	i := int(packet[0] & 0x0f) * 4
-	header.SrcPort = binary.BigEndian.Uint16(packet[i:i+2])
-	header.DstPort = binary.BigEndian.Uint16(packet[i+2:i+4])
-	header.Length = binary.BigEndian.Uint16(packet[i+4:i+6])
-	header.Checksum = binary.BigEndian.Uint16(packet[i+6:i+8])
+	i := int(packet[0]&0x0f) * 4
+	header.SrcPort = binary.BigEndian.Uint16(packet[i : i+2])
+	header.DstPort = binary.BigEndian.Uint16(packet[i+2 : i+4])
+	header.Length = binary.BigEndian.Uint16(packet[i+4 : i+6])
+	header.Checksum = binary.BigEndian.Uint16(packet[i+6 : i+8])
 	return header, packet[i+8:]
 }
 
 func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, responsePayload []byte) []byte {
 	// Calculate lengths
 	udpLength := UDP_HEADER_LEN + len(responsePayload)
-	ipHeaderLen := int(origIPHeader.VersionIHL & 0x0f) * 4 // Standard IP header without options
+	ipHeaderLen := int(origIPHeader.VersionIHL&0x0f) * 4 // Standard IP header without options
 	totalLength := ipHeaderLen + udpLength
 
 	// Create packet buffer
@@ -35,8 +35,8 @@ func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, respo
 	binary.BigEndian.PutUint16(packet[2:4], uint16(totalLength))
 	binary.BigEndian.PutUint16(packet[4:6], origIPHeader.ID+1) // Increment ID
 	binary.BigEndian.PutUint16(packet[6:8], 0)                 // No flags, no fragment
-	packet[8] = 64                                              // TTL
-	packet[9] = 17                                              // UDP protocol
+	packet[8] = 64                                             // TTL
+	packet[9] = 17                                             // UDP protocol
 	// Checksum will be calculated later
 	copy(packet[12:16], origIPHeader.DstIP[:]) // Swap: original dst becomes src
 	copy(packet[16:20], origIPHeader.SrcIP[:]) // Swap: original src becomes dst
@@ -68,7 +68,7 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
 	dport := int(udphdr.DstPort)
 	addr := net.UDPAddr{
-		IP: net.IP(iphdr.DstIP[:]),
+		IP:   net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
 	if (src & 0xffffff00) != 0x0a000200 {
@@ -82,11 +82,13 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		dport = tport
 	}
 	key := ConnKey{
-		SrcIP: src,
 		SrcPort: sport,
-		DstIP: dst,
 		DstPort: dport,
+		IsIPv6:  false,
 	}
+	// Map IPv4 addresses to first 4 bytes of the 16-byte array
+	binary.BigEndian.PutUint32(key.SrcIP[:4], src)
+	binary.BigEndian.PutUint32(key.DstIP[:4], dst)
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	item, exists := cm.data[key]
@@ -117,4 +119,3 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	}
 	return key, item, udphdr, payload, nil
 }
-

@@ -19,3 +19,21 @@ func parseIPHeader(packet []byte) IPHeader {
 	return header
 }
 
+func parseIPv6Header(packet []byte) IPv6Header {
+	var header IPv6Header
+	header.VersionTCFL = binary.BigEndian.Uint32(packet[0:4])
+	header.PayloadLength = binary.BigEndian.Uint16(packet[4:6])
+	header.NextHeader = packet[6]
+	header.HopLimit = packet[7]
+	copy(header.SrcIP[:], packet[8:24])
+	copy(header.DstIP[:], packet[24:40])
+	return header
+}
+
+func isIPv6Packet(packet []byte) bool {
+	if len(packet) < 1 {
+		return false
+	}
+	version := (packet[0] >> 4) & 0x0F
+	return version == 6
+}

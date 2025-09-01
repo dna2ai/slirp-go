@@ -3,16 +3,16 @@ package slirp
 import (
 	"container/list"
 	"encoding/binary"
+	"fmt"
+	"io"
+	"math/rand"
 	"net"
 	"time"
-	"io"
-	"fmt"
-	"math/rand"
 )
 
 func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
 	// VersionIHL = packet[0]
-	i := int(packet[0] & 0x0f) * 4
+	i := int(packet[0]&0x0f) * 4
 	var header TCPHeader
 	header.SrcPort = binary.BigEndian.Uint16(packet[i : i+2])
 	header.DstPort = binary.BigEndian.Uint16(packet[i+2 : i+4])
@@ -30,14 +30,14 @@ func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
 func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNum, ackNum uint32, flags uint8, window, id uint16, responsePayload []byte) []byte {
 	// IP header
 	ipHeader := make([]byte, 20)
-	ipHeader[0] = 0x45 // Version 4, IHL 5
-	ipHeader[1] = 0    // TOS
+	ipHeader[0] = 0x45                         // Version 4, IHL 5
+	ipHeader[1] = 0                            // TOS
 	totalLen := 20 + 20 + len(responsePayload) // IP + TCP + payload
 	binary.BigEndian.PutUint16(ipHeader[2:4], uint16(totalLen))
-	binary.BigEndian.PutUint16(ipHeader[4:6], id) // ID
-	ipHeader[6] = 0x40 // Don't fragment
-	ipHeader[8] = 64   // TTL
-	ipHeader[9] = 6    // TCP protocol
+	binary.BigEndian.PutUint16(ipHeader[4:6], id)  // ID
+	ipHeader[6] = 0x40                             // Don't fragment
+	ipHeader[8] = 64                               // TTL
+	ipHeader[9] = 6                                // TCP protocol
 	binary.BigEndian.PutUint16(ipHeader[10:12], 0) // checksume placeholder
 	copy(ipHeader[12:16], origIPHeader.DstIP[:])
 	copy(ipHeader[16:20], origIPHeader.SrcIP[:])
@@ -77,7 +77,7 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
 	dport := int(tcphdr.DstPort)
 	addr := net.UDPAddr{
-		IP: net.IP(iphdr.DstIP[:]),
+		IP:   net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
 	if (src & 0xffffff00) != 0x0a000200 {
@@ -91,11 +91,13 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		dport = tport
 	}
 	key := ConnKey{
-		SrcIP: src,
 		SrcPort: sport,
-		DstIP: dst,
 		DstPort: dport,
+		IsIPv6:  false,
 	}
+	// Map IPv4 addresses to first 4 bytes of the 16-byte array
+	binary.BigEndian.PutUint32(key.SrcIP[:4], src)
+	binary.BigEndian.PutUint32(key.DstIP[:4], dst)
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	item, exists := cm.data[key]
@@ -116,27 +118,54 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 	}
 	payloadN := len(payload)
 	debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
-	switch (item.state.value) {
-	case TcpStateClosed:
-		if tcphdr.Flags & SYN != 0 {
-			item.HandleTcpClnSYN(&iphdr, &tcphdr)
+	// Handle server connections differently
+	if item.isServer {
+		switch item.state.value {
+		case TcpStateClosed:
+			// Server should not receive SYN in closed state - this is an error
+			debugPrintf("[E] Server connection received SYN in closed state\r\n")
+		case TcpStateInit:
+			// Server waiting for SYN-ACK response from UML
+			if tcphdr.Flags&(SYN|ACK) == (SYN | ACK) {
+				item.HandleTcpSrvSYNACK(&iphdr, &tcphdr)
+			} else if tcphdr.Flags&RST != 0 {
+				item.HandleTcpSrvRST(&iphdr, &tcphdr)
+			}
+		case TcpStateEstablished:
+			if payloadN > 0 {
+				item.HandleTcpSrvData(&iphdr, &tcphdr, payload)
+			} else if tcphdr.Flags&FIN != 0 {
+				item.HandleTcpSrvFIN(&iphdr, &tcphdr)
+			} else if tcphdr.Flags&ACK != 0 {
+				item.HandleTcpSrvACK(&iphdr, &tcphdr)
+			}
+		case TcpStateFinWait1:
+			item.HandleTcpSrvFIN2(&iphdr, &tcphdr)
 		}
-	case TcpStateInit:
-		if tcphdr.Flags & ACK != 0 {
-			item.HandleTcpClnACK(&iphdr, &tcphdr)
-		} // -> server: TcpStateSynReceived, client: TcpStateEstablished
-	case TcpStateEstablished:
-		if payloadN > 0 {
-			item.HandleTcpClnData(&iphdr, &tcphdr, payload)
-		} else if tcphdr.Flags & FIN != 0 {
-			item.HandleTcpClnFIN(&iphdr, &tcphdr)
-		} else if tcphdr.Flags & ACK != 0 {
-			item.HandleTcpClnACK(&iphdr, &tcphdr)
+	} else {
+		// Client connections (original logic)
+		switch item.state.value {
+		case TcpStateClosed:
+			if tcphdr.Flags&SYN != 0 {
+				item.HandleTcpClnSYN(&iphdr, &tcphdr)
+			}
+		case TcpStateInit:
+			if tcphdr.Flags&ACK != 0 {
+				item.HandleTcpClnACK(&iphdr, &tcphdr)
+			} // -> server: TcpStateSynReceived, client: TcpStateEstablished
+		case TcpStateEstablished:
+			if payloadN > 0 {
+				item.HandleTcpClnData(&iphdr, &tcphdr, payload)
+			} else if tcphdr.Flags&FIN != 0 {
+				item.HandleTcpClnFIN(&iphdr, &tcphdr)
+			} else if tcphdr.Flags&ACK != 0 {
+				item.HandleTcpClnACK(&iphdr, &tcphdr)
+			}
+		case TcpStateFinWait1:
+			// FIN, server: TcpStateFinWait2
+			item.HandleTcpClnFIN2(&iphdr, &tcphdr)
+			// -> TcpStateClosed
 		}
-	case TcpStateFinWait1:
-		// FIN, server: TcpStateFinWait2
-		item.HandleTcpClnFIN2(&iphdr, &tcphdr)
-		// -> TcpStateClosed
 	}
 	return key, item, tcphdr, payload, nil
 }
@@ -185,7 +214,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		return
 	}
 	cv.state.inBusy = true
-	ipHeaderLen := int(iphdr.VersionIHL & 0x0f) * 4
+	ipHeaderLen := int(iphdr.VersionIHL&0x0f) * 4
 	tcpHeaderLen := 20
 	maxPayloadByMTU := config.MTU - ipHeaderLen - tcpHeaderLen
 	maxPayloadByWindow := int(tcphdr.Window)
@@ -202,13 +231,13 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	data := firstElem.Value.([]byte)
 	n := len(data)
 	L := maxPayloadSize
-	if cv.state.inOffset + maxPayloadSize > n {
+	if cv.state.inOffset+maxPayloadSize > n {
 		L = n - cv.state.inOffset
 		data = data[cv.state.inOffset:]
 		cv.state.inQ.Remove(firstElem)
 		cv.state.inOffset = 0
 	} else {
-		data = data[cv.state.inOffset:cv.state.inOffset+L]
+		data = data[cv.state.inOffset : cv.state.inOffset+L]
 		cv.state.inOffset += L
 	}
 	if L == 0 {
@@ -277,7 +306,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inBusy = false
 	cv.lastActivity = time.Now()
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, 65535, 0, nil)
-        cv.state.serverSeq ++
+	cv.state.serverSeq++
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 	go cv.handleTcpResponse(iphdr, tcphdr)
@@ -319,7 +348,7 @@ func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|FIN, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
-	cv.state.serverSeq ++
+	cv.state.serverSeq++
 	cv.state.value = TcpStateClosed
 	// TODO: remove from cm
 }
@@ -335,4 +364,144 @@ func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
+}
+
+// Server-side TCP handlers for SOCKS5 connections
+
+func (cv *ConnVal) HandleTcpSrvSYNACK(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP Server received SYN-ACK from %s:%d\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	// Clear SYN timeout tracking - connection is now established
+	cv.synSentTime = time.Time{}
+
+	// Update sequence numbers
+	cv.state.serverSeq = tcphdr.SeqNum + 1
+	cv.state.clientSeq = tcphdr.AckNum
+	cv.state.value = TcpStateEstablished
+	cv.lastActivity = time.Now()
+
+	// Send ACK to complete handshake
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.clientSeq, cv.state.serverSeq, ACK, 65535, 0, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+
+	// Send any buffered data from SOCKS5 client
+	if len(cv.serverBuffer) > 0 {
+		cv.sendBufferedDataToServer(iphdr, tcphdr)
+	}
+
+	debugPrintf("[I] TCP Server connection established\r\n")
+}
+
+func (cv *ConnVal) HandleTcpSrvData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
+	debugPrintf("[I] TCP Server received %d bytes from %s:%d\r\n", len(payload), net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	// Update sequence numbers
+	cv.state.serverSeq = tcphdr.SeqNum + uint32(len(payload))
+	cv.state.clientSeq = tcphdr.AckNum
+	cv.lastActivity = time.Now()
+
+	// Send ACK
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.clientSeq, cv.state.serverSeq, ACK, 65535, 0, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+
+	// Buffer data to be sent to SOCKS5 client
+	cv.serverBuffer = append(cv.serverBuffer, payload...)
+}
+
+func (cv *ConnVal) HandleTcpSrvACK(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP Server received ACK from %s:%d\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	cv.state.clientSeq = tcphdr.SeqNum
+	cv.state.serverSeq = tcphdr.AckNum
+	cv.lastActivity = time.Now()
+}
+
+func (cv *ConnVal) HandleTcpSrvFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP Server received FIN from %s:%d\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	// Clear timeout tracking
+	cv.finSentTime = time.Time{}
+
+	cv.state.value = TcpStateFinWait1
+	cv.state.serverSeq = tcphdr.SeqNum + 1
+	cv.lastActivity = time.Now()
+
+	// Send ACK for FIN
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.clientSeq, cv.state.serverSeq, ACK, 65535, 0, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+
+	// Close SOCKS5 client connection
+	if cv.TCPsrvConn != nil {
+		cv.TCPsrvConn.Close()
+		cv.TCPsrvConn = nil
+	}
+}
+
+func (cv *ConnVal) HandleTcpSrvFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP Server FIN-2 from %s:%d\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.clientSeq, cv.state.serverSeq, ACK|FIN, 65535, 0, nil)
+	encoded := encodeSLIP(ret)
+	go seqPrintPacket(encoded)
+	cv.state.clientSeq++
+	cv.state.value = TcpStateClosed
+}
+
+func (cv *ConnVal) HandleTcpSrvRST(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP Server received RST from %s:%d - server refused connection\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	// Clear timeout tracking
+	cv.synSentTime = time.Time{}
+	cv.finSentTime = time.Time{}
+
+	cv.state.value = TcpStateClosed
+
+	// Close SOCKS5 client connection - server refused the connection
+	if cv.TCPsrvConn != nil {
+		debugPrintf("[I] Closing SOCKS5 client connection due to server RST\r\n")
+		cv.TCPsrvConn.Close()
+		cv.TCPsrvConn = nil
+	}
+}
+
+func (cv *ConnVal) sendBufferedDataToServer(iphdr *IPHeader, tcphdr *TCPHeader) {
+	if len(cv.serverBuffer) == 0 {
+		return
+	}
+
+	// Fragment data if necessary
+	maxPayload := config.MTU - 20 - 20 // IP header + TCP header
+	data := cv.serverBuffer
+	cv.serverBuffer = cv.serverBuffer[:0] // Clear buffer
+
+	for len(data) > 0 {
+		fragmentSize := len(data)
+		if fragmentSize > maxPayload {
+			fragmentSize = maxPayload
+		}
+
+		fragment := data[:fragmentSize]
+		data = data[fragmentSize:]
+
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.clientSeq, cv.state.serverSeq, PSH|ACK, 65535, 0, fragment)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+
+		cv.state.clientSeq += uint32(len(fragment))
+	}
 }
