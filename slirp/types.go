@@ -1,18 +1,15 @@
 package slirp
 
 import (
-	"container/list"
 	"net"
-	"sync"
 	"time"
+	"sync"
+	"container/list"
 )
 
 type SlirpConfig struct {
-	Debug         bool
-	MTU           int
-	EnableIPv6    bool
-	EnableServers bool
-	Socks5Port    int
+	Debug bool
+	MTU   int
 }
 
 // IP header structure (20 bytes minimum)
@@ -29,30 +26,12 @@ type IPHeader struct {
 	DstIP          [4]byte
 }
 
-// IPv6 header structure (40 bytes)
-type IPv6Header struct {
-	VersionTCFL   uint32 // Version (4 bits), Traffic Class (8 bits), Flow Label (20 bits)
-	PayloadLength uint16
-	NextHeader    uint8
-	HopLimit      uint8
-	SrcIP         [16]byte
-	DstIP         [16]byte
-}
-
 // ICMP header structure
 type ICMPHeader struct {
 	Type     uint8
 	Code     uint8
 	Checksum uint16
 	Unused   uint32
-}
-
-// ICMPv6 header structure
-type ICMPv6Header struct {
-	Type     uint8
-	Code     uint8
-	Checksum uint16
-	Data     uint32
 }
 
 // TCPHeader represents a TCP header
@@ -77,35 +56,26 @@ type UDPHeader struct {
 }
 
 type ConnKey struct {
-	SrcIP   [16]byte // Support both IPv4 and IPv6 (IPv4 mapped to first 4 bytes)
-	SrcPort int
-	DstIP   [16]byte // Support both IPv4 and IPv6 (IPv4 mapped to first 4 bytes)
-	DstPort int
-	IsIPv6  bool
+        SrcIP   uint32
+        SrcPort int
+        DstIP   uint32
+        DstPort int
 }
 
 type ConnVal struct {
 	// 0 none, 100 tcp client, 101 tcp server, 200 udp client, 201 udp server
-	Type         int
-	Key          *ConnKey
-	UDPcln       *net.UDPConn
-	UDPsrv       *net.UDPConn
-	TCPcln       *net.TCPConn
-	TCPsrv       *net.TCPListener
-	TCPsrvConn   *net.TCPConn // For accepted server connections
+	Type int
+	Key *ConnKey
+	UDPcln *net.UDPConn
+	UDPsrv *net.UDPConn
+	TCPcln *net.TCPConn
+	TCPsrv *net.TCPListener
 	lastActivity time.Time
-	done         chan bool
-	container    *ConnMap
-	lock         sync.Mutex
-	disposed     bool
-	state        *TcpState
-	isServer     bool
-	serverBuffer []byte // Buffer for server-side data
-
-	// Connection establishment tracking
-	synSentTime       time.Time     // When SYN was sent
-	finSentTime       time.Time     // When FIN was sent
-	connectionTimeout time.Duration // Timeout for connection establishment
+	done chan bool
+	container *ConnMap
+	lock sync.Mutex
+	disposed bool
+	state *TcpState
 }
 
 type TcpState struct {

@@ -1,8 +1,8 @@
 package slirp
 
 import (
-	"net"
 	"time"
+	"net"
 )
 
 func (cv *ConnVal) IsTimeout(now *time.Time) bool {
@@ -14,15 +14,11 @@ func (cv *ConnVal) IsTimeout(now *time.Time) bool {
 		now = &cur
 	}
 	var timeoutT time.Duration
-	switch cv.Type {
-	case 100:
-		timeoutT = 24 * 3600 * time.Second
-	case 101:
-		timeoutT = 24 * 3600 * time.Second
-	case 200:
-		timeoutT = 30 * time.Second
-	case 201:
-		timeoutT = 30 * time.Second
+	switch(cv.Type) {
+	case 100: timeoutT = 24 * 3600 * time.Second
+	case 101: timeoutT = 24 * 3600 * time.Second
+	case 200: timeoutT = 30 * time.Second
+	case 201: timeoutT = 30 * time.Second
 	}
 	if (*now).Sub(cv.lastActivity) > timeoutT {
 		return true
@@ -32,7 +28,7 @@ func (cv *ConnVal) IsTimeout(now *time.Time) bool {
 
 func (cv *ConnVal) Close() {
 	// TODO: send FIN, RST for tcp
-	switch cv.Type {
+	switch(cv.Type) {
 	case 100:
 		if cv.TCPcln != nil {
 			cv.TCPcln.Close()
@@ -42,10 +38,6 @@ func (cv *ConnVal) Close() {
 		if cv.TCPsrv != nil {
 			cv.TCPsrv.Close()
 			cv.TCPsrv = nil
-		}
-		if cv.TCPsrvConn != nil {
-			cv.TCPsrvConn.Close()
-			cv.TCPsrvConn = nil
 		}
 	case 200:
 		if cv.UDPcln != nil {
@@ -103,3 +95,4 @@ func (cv *ConnVal) Dispose() {
 	close(cv.done)
 	cv.Close()
 }
+
