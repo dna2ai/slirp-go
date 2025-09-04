@@ -22,13 +22,17 @@ $ curl https://www.google.com
 ## known issues and future work
 
 - [ ] no ipv6 support yet
-- [ ] no server support yet
-- [ ] - tcp server: SYN-ACK
-- [ ] - udp server
-- [ ] - route traffic by proxy mode for example socks5; then ensure `ALL_PROXY=socks5://... ssh root@10.0.2.15`
-- [ ] refactor code into files instead of all-in-one file
+- [ ] no UDP server support yet
 - [ ] add test
 
+## version 0.0.6
+
+- support socks5 server
+- manually integration with tcp framework
+
+```
+write a simple socks5 server to read data, and response echo message in golang
+```
 
 ## version 0.0.5
 

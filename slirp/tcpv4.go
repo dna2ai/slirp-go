@@ -70,19 +70,10 @@ func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNu
 	return append(ipHeader, tcpData...)
 }
 
-func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, TCPHeader, []byte, error) {
-	tcphdr, payload := parseTCPHeader(packet)
+func (cm *ConnMap) BuildTcpConnectionKey(iphdr *IPHeader, sport, dport int) *ConnKey {
 	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
-	sport := int(tcphdr.SrcPort)
 	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
-	dport := int(tcphdr.DstPort)
-	addr := net.UDPAddr{
-		IP: net.IP(iphdr.DstIP[:]),
-		Port: dport,
-	}
-	if (src & 0xffffff00) != 0x0a000200 {
-		addr.IP = net.IP(iphdr.SrcIP[:])
-		addr.Port = sport
+	if src > dst || (src == dst && sport > dport) {
 		tmp := src
 		tport := sport
 		src = dst
@@ -90,29 +81,37 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		dst = tmp
 		dport = tport
 	}
-	key := ConnKey{
+	ret := &ConnKey{
 		SrcIP: src,
 		SrcPort: sport,
 		DstIP: dst,
 		DstPort: dport,
 	}
+	return ret
+}
+
+func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey, *ConnVal, TCPHeader, []byte, error) {
+	tcphdr, payload := parseTCPHeader(packet)
+	sport := int(tcphdr.SrcPort)
+	dport := int(tcphdr.DstPort)
+	key := cm.BuildTcpConnectionKey(&iphdr, sport, dport)
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	item, exists := cm.data[key]
+	item, exists := cm.data[*key]
 	if exists {
-		debugPrintf("tcp: using exists key ...\r\n")
+		debugPrintf("tcp: using existing key ...\r\n")
 		item.lastActivity = time.Now()
 	} else {
 		debugPrintf("tcp: using new key ...\r\n")
 		item = &ConnVal{}
-		item.Type = 100
-		item.Key = &key
+		item.Type = ConnTypeTcpClient
+		item.Key = key
 		item.lastActivity = time.Now()
 		item.done = make(chan bool)
 		item.state = &TcpState{}
 		item.state.value = TcpStateClosed
 		item.disposed = false
-		cm.data[key] = item
+		cm.data[*key] = item
 	}
 	payloadN := len(payload)
 	debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
@@ -123,7 +122,11 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		}
 	case TcpStateInit:
 		if tcphdr.Flags & ACK != 0 {
-			item.HandleTcpClnACK(&iphdr, &tcphdr)
+			if tcphdr.Flags & SYN != 0 {
+				item.HandleTcpClnSYNACK(&iphdr, &tcphdr)
+			} else {
+				item.HandleTcpClnACK(&iphdr, &tcphdr)
+			}
 		} // -> server: TcpStateSynReceived, client: TcpStateEstablished
 	case TcpStateEstablished:
 		if payloadN > 0 {
@@ -150,6 +153,7 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		n, err := cv.TCPcln.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
+				// TODO: wrong processing, should mark closing and wait for cv.actTcpResponse, then send FIN|ACK
 				cv.lock.Lock()
 				if cv.state.inQ.Len() == 0 || len(cv.state.inQ.Back().Value.([]byte)) > 0 {
 					cv.state.inQ.PushBack([]byte{})
@@ -158,7 +162,7 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 			} else {
 				debugPrintf("[I] TCP read RST packet to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
 				cv.Dispose()
-				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
+				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, tcphdr.Window, 0, nil)
 				encoded := encodeSLIP(ret)
 				go seqPrintPacket(encoded)
 			}
@@ -276,10 +280,29 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inOffset = 0
 	cv.state.inBusy = false
 	cv.lastActivity = time.Now()
-	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, 65535, 0, nil)
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, tcphdr.Window, 0, nil)
         cv.state.serverSeq ++
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
+	go cv.handleTcpResponse(iphdr, tcphdr)
+}
+
+func (cv *ConnVal) HandleTcpClnSYNACK(iphdr *IPHeader, tcphdr *TCPHeader) {
+	debugPrintf("[I] TCP SYN-ACK packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+	cv.state.value = TcpStateEstablished
+	cv.state.serverSeq = tcphdr.AckNum
+	cv.state.clientSeq = tcphdr.SeqNum+1
+	cv.state.inQ = list.New()
+	cv.state.inOffset = 0
+	cv.state.inBusy = false
+	cv.lastActivity = time.Now()
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK, tcphdr.Window, 0, nil)
+	debugPrintf("[I] TCP ACK packet to %s:%d\r\n", net.IP(iphdr.SrcIP[:]), tcphdr.SrcPort)
+	debugDumpPacket(ret)
+	encoded := encodeSLIP(ret)
+	seqPrintPacket(encoded)
 	go cv.handleTcpResponse(iphdr, tcphdr)
 }
 
@@ -301,36 +324,32 @@ func (cv *ConnVal) HandleTcpClnFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP FIN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
+	cv.Close()
 	cv.state.value = TcpStateFinWait1
 	cv.state.clientSeq = tcphdr.SeqNum + 1
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
-	if cv.TCPcln != nil {
-		cv.TCPcln.Close()
-	}
 }
 
 func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
+	cv.container.Pop(cv.key)
 	//cv.state.value = TcpStateClosing
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|FIN, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 	cv.state.serverSeq ++
 	cv.state.value = TcpStateClosed
-	// TODO: remove from cm
 }
 
 func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
-	if cv.TCPcln != nil {
-		cv.TCPcln.Close()
-	}
+	cv.Close()
 	cv.state.value = TcpStateClosed
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 	encoded := encodeSLIP(ret)

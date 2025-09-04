@@ -12,6 +12,18 @@ func NewConnMap() *ConnMap {
 	return cm
 }
 
+func (cm *ConnMap) Pop(key *ConnKey) bool {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	item, exists := cm.data[*key]
+	if !exists {
+		return false
+	}
+	item.Close()
+	delete(cm.data, *key)
+	return true
+}
+
 func (cm *ConnMap) cleanup() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()

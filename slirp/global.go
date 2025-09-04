@@ -14,6 +14,7 @@ var (
 	reader *bufio.Reader
 	writer *bufio.Writer
 	config *SlirpConfig
+	socks5Server *Socks5Server
 )
 
 func Run() {
@@ -24,6 +25,7 @@ func Run() {
 	config = &SlirpConfig{}
 	flag.BoolVar(&config.Debug, "debug", false, "Enable debug info")
 	flag.IntVar(&config.MTU, "mtu", 1500, "Set MTU value")
+	flag.IntVar(&config.Socks5Port, "socks5", 0, "Enable server support and specify port (SOCKS5)")
 	flag.Parse()
 
 	infoPrintf("- guest network address: 10.0.2.15\r\n")
@@ -31,6 +33,16 @@ func Run() {
 	infoPrintf("# run commands to config network:\r\n")
 	infoPrintf("$ ifconfig eth0 10.0.2.15 netmask 255.255.255.0 up\r\n")
 	infoPrintf("$ route add default gw 10.0.2.2\r\n")
+
+	if config.Socks5Port > 0 {
+		var err error
+		socks5Server, err = NewSocks5Server(config.Socks5Port, cm)
+		if err != nil {
+			infoPrintf("[E] Failed to start SOCKS5 server: %v\r\n", err)
+		} else {
+			infoPrintf("- SOCKS5 proxy started on port %d\r\n", config.Socks5Port)
+		}
+	}
 
 	for {
 		packet, err := readSLIPPacket(reader)

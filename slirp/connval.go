@@ -15,10 +15,10 @@ func (cv *ConnVal) IsTimeout(now *time.Time) bool {
 	}
 	var timeoutT time.Duration
 	switch(cv.Type) {
-	case 100: timeoutT = 24 * 3600 * time.Second
-	case 101: timeoutT = 24 * 3600 * time.Second
-	case 200: timeoutT = 30 * time.Second
-	case 201: timeoutT = 30 * time.Second
+	case ConnTypeTcpClient: timeoutT = 24 * 3600 * time.Second
+	case ConnTypeTcpServer: timeoutT = 24 * 3600 * time.Second
+	case ConnTypeUdpClient: timeoutT = 30 * time.Second
+	case ConnTypeUdpServer: timeoutT = 30 * time.Second
 	}
 	if (*now).Sub(cv.lastActivity) > timeoutT {
 		return true
@@ -29,25 +29,15 @@ func (cv *ConnVal) IsTimeout(now *time.Time) bool {
 func (cv *ConnVal) Close() {
 	// TODO: send FIN, RST for tcp
 	switch(cv.Type) {
-	case 100:
+	case ConnTypeTcpClient, ConnTypeTcpServer:
 		if cv.TCPcln != nil {
 			cv.TCPcln.Close()
 			cv.TCPcln = nil
 		}
-	case 101:
-		if cv.TCPsrv != nil {
-			cv.TCPsrv.Close()
-			cv.TCPsrv = nil
-		}
-	case 200:
+	case ConnTypeUdpClient, ConnTypeUdpServer:
 		if cv.UDPcln != nil {
 			cv.UDPcln.Close()
 			cv.UDPcln = nil
-		}
-	case 201:
-		if cv.UDPsrv != nil {
-			cv.UDPsrv.Close()
-			cv.UDPsrv = nil
 		}
 	}
 }

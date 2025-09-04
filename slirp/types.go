@@ -7,9 +7,21 @@ import (
 	"container/list"
 )
 
+type ConnType int
+const (
+	ConnTypeNone ConnType = iota
+	ConnTypeTcpClient
+	ConnTypeTcpServer
+	ConnTypeUdpClient
+	ConnTypeUdpServer
+	ConnTypeUnknown
+)
+
+
 type SlirpConfig struct {
 	Debug bool
 	MTU   int
+	Socks5Port int
 }
 
 // IP header structure (20 bytes minimum)
@@ -63,28 +75,28 @@ type ConnKey struct {
 }
 
 type ConnVal struct {
-	// 0 none, 100 tcp client, 101 tcp server, 200 udp client, 201 udp server
-	Type int
+	Type ConnType
 	Key *ConnKey
 	UDPcln *net.UDPConn
-	UDPsrv *net.UDPConn
 	TCPcln *net.TCPConn
-	TCPsrv *net.TCPListener
+
+	container *ConnMap
 	lastActivity time.Time
 	done chan bool
-	container *ConnMap
 	lock sync.Mutex
 	disposed bool
 	state *TcpState
 }
 
 type TcpState struct {
-	value     int
-	clientSeq uint32
-	serverSeq uint32
-	inQ       *list.List
-	inOffset  int
-	inBusy    bool
+	value      int
+	clientSeq  uint32
+	serverSeq  uint32
+	inQ        *list.List
+	inOffset   int
+	inBusy     bool
+	targetIP   uint32
+	targetPort int
 }
 
 type ConnMap struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -39,6 +40,32 @@ func calculateSubChecksum(srcIP [4]byte, dstIP [4]byte, protocol uint8, data []b
 	pseudoHeader[9] = protocol
 	binary.BigEndian.PutUint16(pseudoHeader[10:12], uint16(len(data)))
 	return calculateChecksum(append(pseudoHeader, data...))
+}
+
+func getAddrInfo(addr net.Addr) (net.IP, int) {
+	var ip net.IP
+	var portNum int
+	switch v := addr.(type) {
+	case *net.TCPAddr:
+		ip = v.IP
+		portNum = v.Port
+	case *net.UDPAddr:
+		ip = v.IP
+		portNum = v.Port
+	default:
+		return nil, 0
+	}
+
+	return ip, portNum
+}
+
+func getIpv4FromUint32(ip uint32) net.IP {
+	return net.IPv4(
+		byte(ip>>24),
+		byte(ip>>16&0xFF),
+		byte(ip>>8&0xFF),
+		byte(ip&0xFF),
+	)
 }
 
 func getTcpStateName(state int) string {
@@ -92,4 +119,3 @@ func seqPrintPacket(data []byte) {
 		writer.Flush()
 	}
 }
-
