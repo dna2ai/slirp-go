@@ -3,21 +3,31 @@ package slirp
 import (
 	"bufio"
 	"flag"
+	"fmt"
 	"io"
 	"os"
 	"sync"
 )
 
 var (
-	printMutex     sync.Mutex
-	debugDumpMutex sync.Mutex
-	reader         *bufio.Reader
-	writer         *bufio.Writer
-	config         *SlirpConfig
-	socks5Server   *Socks5Server
+	printMutex   sync.Mutex
+	reader       *bufio.Reader
+	writer       *bufio.Writer
+	config       *SlirpConfig
+	socks5Server *Socks5Server
+	logChannel   chan string
 )
 
+func processLogMessages() {
+	for msg := range logChannel {
+		fmt.Fprint(os.Stderr, msg)
+	}
+}
+
 func Run() {
+	logChannel = make(chan string, 1024)
+	go processLogMessages()
+
 	reader = bufio.NewReader(os.Stdin)
 	writer = bufio.NewWriter(os.Stdout)
 	cm := NewConnMap()

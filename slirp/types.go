@@ -57,6 +57,7 @@ type TCPHeader struct {
 	Window     uint16
 	Checksum   uint16
 	Urgent     uint16
+	MSS        uint16
 }
 
 type packetAndHeader struct {
@@ -110,6 +111,11 @@ type TcpState struct {
 	retryCount    int
 	rto           time.Duration // Retransmission timeout
 	closingState  bool          // Indicates if we're in closing process
+
+	// Keep track of the latest headers from the client for window updates
+	lastClientIpHeader  IPHeader
+	lastClientTcpHeader TCPHeader
+	serverClosed        bool // Indicates if the server has closed its end
 }
 
 type ConnMap struct {

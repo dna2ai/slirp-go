@@ -398,14 +398,25 @@ func (s *Socks5Server) serveUDP() {
 
 // maintainUDPAssociation keeps the TCP connection alive for UDP association
 func (s *Socks5Server) maintainUDPAssociation(conn net.Conn) {
-	// Keep reading from the TCP connection to detect when it closes
-	buffer := make([]byte, 1)
-	for {
-		_, err := conn.Read(buffer)
-		if err != nil {
-			debugPrintf("[I] SOCKS5 UDP association closed\r\n")
-			conn.Close()
-			return
+	// Keep probing the TCP connection to detect when it closes
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	defer conn.Close() // Ensure connection is closed on exit
+
+	for range ticker.C {
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+			_, err := tcpConn.Read(make([]byte, 0))
+			tcpConn.SetReadDeadline(time.Time{})
+
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue // Expected, connection is alive
+				}
+				// Any other error means the connection is dead
+				debugPrintf("[I] SOCKS5 UDP association closed: %v\r\n", err)
+				return
+			}
 		}
 	}
 }

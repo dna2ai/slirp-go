@@ -156,6 +156,11 @@ func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
 
 func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
 	udphdr, payload := parseUdpHeader(packet)
+	dstIPStr := net.IP(iphdr.DstIP[:]).String()
+	if dstIPStr == "10.0.2.15" || dstIPStr == "127.0.0.1" {
+		return ConnKey{}, nil, udphdr, payload, nil
+	}
+
 	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
 	sport := int(udphdr.SrcPort)
 	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])

@@ -94,13 +94,13 @@ func getTcpStateName(state int) string {
 
 func debugDumpPacket(data []byte) {
 	if config.Debug {
-		fmt.Fprintf(os.Stderr, strings.ReplaceAll(hex.Dump(data), "\n", "\r\n"))
+		logChannel <- strings.ReplaceAll(hex.Dump(data), "\n", "\r\n")
 	}
 }
 
 func debugPrintf(format string, args ...interface{}) {
 	if config.Debug {
-		fmt.Fprintf(os.Stderr, format, args...)
+		logChannel <- fmt.Sprintf(format, args...)
 	}
 }
 

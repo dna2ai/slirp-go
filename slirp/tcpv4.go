@@ -23,8 +23,36 @@ func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
 	header.Window = binary.BigEndian.Uint16(packet[i+14 : i+16])
 	header.Checksum = binary.BigEndian.Uint16(packet[i+16 : i+18])
 	header.Urgent = binary.BigEndian.Uint16(packet[i+18 : i+20])
+	header.MSS = 0
 
-	return header, packet[i+20:]
+	// Parse options if present
+	if header.DataOffset > 5 {
+		options := packet[i+20 : i+int(header.DataOffset*4)]
+		for len(options) > 0 {
+			kind := options[0]
+			if kind == 0 { // End of options list
+				break
+			}
+			if kind == 1 { // No-op
+				options = options[1:]
+				continue
+			}
+			if len(options) < 2 {
+				break
+			}
+			length := options[1]
+			if length < 2 || int(length) > len(options) {
+				break
+			}
+
+			if kind == 2 && length == 4 { // MSS
+				header.MSS = binary.BigEndian.Uint16(options[2:4])
+			}
+			options = options[length:]
+		}
+	}
+
+	return header, packet[i+int(header.DataOffset*4):]
 }
 
 func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNum, ackNum uint32, flags uint8, window, id uint16, responsePayload []byte) []byte {
@@ -42,19 +70,39 @@ func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNu
 	copy(ipHeader[12:16], origIPHeader.DstIP[:])
 	copy(ipHeader[16:20], origIPHeader.SrcIP[:])
 
+	// TCP header
+	var tcpOptions []byte
+	if flags&SYN != 0 {
+		// Add MSS option for SYN packets
+		tcpOptions = make([]byte, 4)
+		tcpOptions[0] = 2 // Kind: MSS
+		tcpOptions[1] = 4 // Length: 4
+		// A common MSS value for Ethernet (1500) minus IP (20) and TCP (20) headers.
+		binary.BigEndian.PutUint16(tcpOptions[2:4], 1460)
+	}
+
+	tcpHeaderLen := 20 + len(tcpOptions)
+	totalLen = 20 + tcpHeaderLen + len(responsePayload)
+	binary.BigEndian.PutUint16(ipHeader[2:4], uint16(totalLen))
+
 	// Calculate IP checksum
 	checksum := calculateChecksum(ipHeader)
 	binary.BigEndian.PutUint16(ipHeader[10:12], checksum)
 
 	// TCP header
-	tcpHeader := make([]byte, 20)
+	tcpHeader := make([]byte, tcpHeaderLen)
 	binary.BigEndian.PutUint16(tcpHeader[0:2], origTCPHeader.DstPort)
 	binary.BigEndian.PutUint16(tcpHeader[2:4], origTCPHeader.SrcPort)
 	binary.BigEndian.PutUint32(tcpHeader[4:8], seqNum)
 	binary.BigEndian.PutUint32(tcpHeader[8:12], ackNum)
-	tcpHeader[12] = 0x50 // Data offset (5 * 4 = 20 bytes)
+	dataOffsetVal := (tcpHeaderLen / 4) << 4
+	tcpHeader[12] = byte(dataOffsetVal)
 	tcpHeader[13] = flags
 	binary.BigEndian.PutUint16(tcpHeader[14:16], window)
+
+	if len(tcpOptions) > 0 {
+		copy(tcpHeader[20:], tcpOptions)
+	}
 
 	// Combine TCP header and payload
 	tcpData := tcpHeader
@@ -116,6 +164,13 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 		cm.data[*key] = item
 		go item.processTcpPacketQ()
 	}
+
+	// Ignore packets destined for the guest's own IP or loopback.
+	dstIPStr := net.IP(iphdr.DstIP[:]).String()
+	if dstIPStr == "10.0.2.15" || dstIPStr == "127.0.0.1" {
+		return nil, nil, tcphdr, payload, nil
+	}
+
 	item.state.packetQ <- packetAndHeader{iphdr: iphdr, packet: packet}
 	return key, item, tcphdr, payload, nil
 }
@@ -126,6 +181,12 @@ func (cv *ConnVal) processTcpPacketQ() {
 		packet := ph.packet
 
 		tcphdr, payload := parseTCPHeader(packet)
+
+		// Update the last known headers from the client
+		cv.lock.Lock()
+		cv.state.lastClientIpHeader = iphdr
+		cv.state.lastClientTcpHeader = tcphdr
+		cv.lock.Unlock()
 
 		// Handle RST packets first, as they can occur in any state.
 		if tcphdr.Flags&RST != 0 {
@@ -192,7 +253,7 @@ func (cv *ConnVal) processTcpPacketQ() {
 	}
 }
 
-func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
+func (cv *ConnVal) handleTcpResponse() {
 	buffer := make([]byte, 65535)
 	for {
 		if cv.TCPcln == nil {
@@ -202,33 +263,38 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		if err != nil {
 			if err == io.EOF {
 				// Properly handle EOF - remote side closed connection
-				debugPrintf("[I] TCP EOF from remote, initiating FIN sequence to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 				cv.lock.Lock()
+				iphdr := cv.state.lastClientIpHeader
+				tcphdr := cv.state.lastClientTcpHeader
+				debugPrintf("[I] TCP EOF from remote, initiating FIN sequence to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
+
 				if cv.state.value == TcpStateEstablished {
-					// Active close from server side
-					cv.state.value = TcpStateFinWait1
-					ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
-					cv.state.serverSeq++
-					encoded := encodeSLIP(ret)
-					go seqPrintPacket(encoded)
+					// The server has closed, but we need to send remaining data before sending FIN
+					cv.state.serverClosed = true
 				} else if cv.state.value == TcpStateCloseWait {
 					// Passive close, we have received FIN from client, now server is done
 					cv.state.value = TcpStateLastAck
-					ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
+					ret := GenerateIpTcpPacket(&iphdr, &tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
 					cv.state.serverSeq++
 					encoded := encodeSLIP(ret)
 					go seqPrintPacket(encoded)
 				}
 				cv.lock.Unlock()
 			} else {
+				cv.lock.Lock()
+				iphdr := cv.state.lastClientIpHeader
+				tcphdr := cv.state.lastClientTcpHeader
 				debugPrintf("[I] TCP read error, sending RST to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
 				cv.Dispose()
-				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, tcphdr.Window, 0, nil)
+				ret := GenerateIpTcpPacket(&iphdr, &tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, tcphdr.Window, 0, nil)
 				encoded := encodeSLIP(ret)
 				go seqPrintPacket(encoded)
+				cv.lock.Unlock()
 			}
 			return
 		}
+
+		shouldAct := false
 		cv.lock.Lock()
 		if n > 0 {
 			if cv.state.inQ.Len() == 0 {
@@ -237,15 +303,24 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 			lastElem := cv.state.inQ.Back()
 			lastData := append(lastElem.Value.([]byte), buffer[:n]...)
 			lastElem.Value = lastData
-			go cv.actTcpResponse(iphdr, tcphdr)
+			shouldAct = true
 		}
 		cv.lock.Unlock()
+
+		if shouldAct {
+			go cv.actTcpResponse()
+		}
 	}
 }
 
-func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
+func (cv *ConnVal) actTcpResponse() {
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
+
+	// Get the latest headers from the client to ensure we have the correct window size
+	iphdr := cv.state.lastClientIpHeader
+	tcphdr := cv.state.lastClientTcpHeader
+
 	if cv.state.inBusy || cv.state.inQ.Len() == 0 {
 		return
 	}
@@ -258,6 +333,10 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	if maxPayloadByWindow < maxPayloadSize {
 		maxPayloadSize = maxPayloadByWindow
 	}
+	// Honor the MSS from the client.
+	if tcphdr.MSS > 0 && maxPayloadSize > int(tcphdr.MSS) {
+		maxPayloadSize = int(tcphdr.MSS)
+	}
 	if maxPayloadSize <= 0 && !cv.state.closingState {
 		// wait for window available (but allow FIN to be sent)
 		cv.state.inBusy = false
@@ -267,7 +346,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	data := firstElem.Value.([]byte)
 	n := len(data)
 	L := maxPayloadSize
-	if cv.state.inOffset+maxPayloadSize > n {
+	if cv.state.inOffset+maxPayloadSize >= n {
 		L = n - cv.state.inOffset
 		data = data[cv.state.inOffset:]
 		cv.state.inQ.Remove(firstElem)
@@ -277,7 +356,6 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		cv.state.inOffset += L
 	}
 
-	// Check if this is a FIN signal (empty data and closing state)
 	var flags uint8 = PSH | ACK
 	if L == 0 && cv.state.closingState {
 		// Send FIN|ACK to initiate close
@@ -289,7 +367,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		return
 	}
 
-	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, flags, 65535, 0, data)
+	ret := GenerateIpTcpPacket(&iphdr, &tcphdr, cv.state.serverSeq, cv.state.clientSeq, flags, 65535, 0, data)
 	debugPrintf("[I] forward slice read (+%d -> %d)/%d | %d ...\r\n", L, cv.state.inOffset, n, cv.state.inQ.Len())
 	debugDumpPacket(ret)
 
@@ -310,8 +388,18 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 
+	// If the server has closed and we've sent all the data, send a FIN
+	if cv.state.serverClosed && cv.state.inQ.Len() == 0 {
+		debugPrintf("[I] Server closed and all data sent, sending FIN to client\r\n")
+		cv.state.value = TcpStateFinWait1
+		ret := GenerateIpTcpPacket(&iphdr, &tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
+		cv.state.serverSeq++
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+	}
+
 	// Start retransmission timer if not already running
-	go cv.startRetransmissionTimer(iphdr, tcphdr)
+	go cv.startRetransmissionTimer(&iphdr, &tcphdr)
 }
 
 func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
@@ -367,6 +455,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inBusy = false
 	cv.state.closingState = false
 	cv.state.rto = TCP_INITIAL_RTO
+	cv.state.serverClosed = false
 	cv.lastActivity = time.Now()
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, tcphdr.Window, 0, nil)
 
@@ -380,7 +469,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 	go cv.startRetransmissionTimer(iphdr, tcphdr)
-	go cv.handleTcpResponse(iphdr, tcphdr)
+	go cv.handleTcpResponse()
 }
 
 func (cv *ConnVal) HandleTcpClnSYNACK(iphdr *IPHeader, tcphdr *TCPHeader) {
@@ -399,7 +488,7 @@ func (cv *ConnVal) HandleTcpClnSYNACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugDumpPacket(ret)
 	encoded := encodeSLIP(ret)
 	seqPrintPacket(encoded)
-	go cv.handleTcpResponse(iphdr, tcphdr)
+	go cv.handleTcpResponse()
 }
 
 func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
@@ -425,7 +514,7 @@ func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 
 	if cv.state.value == TcpStateEstablished {
 		cv.state.inBusy = false
-		go cv.actTcpResponse(iphdr, tcphdr)
+		go cv.actTcpResponse()
 	} else if cv.state.value == TcpStateInit {
 		cv.state.value = TcpStateEstablished
 	}
