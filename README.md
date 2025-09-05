@@ -8,7 +8,8 @@ Simple slirp implementation in golang for user mode Linux
 - download linux kernel source code, extract and `ARCH=um make menuconfig` + `ARCH=um make` to get `linux`
 - `go build -o slirp main.go`
 - `linux udba=./rootfs.img root=/dev/udba rw init=/bin/bash eth0=slirp,,/path/to/slirp,-debug`
-- in the user mode linux
+
+in the user mode linux
 
 ```
 # example of ubuntu rootfs
@@ -19,6 +20,16 @@ $ apt update
 $ apt install -y curl
 $ curl https://www.google.com
 ```
+
+- `slirp.sh`: run `slirp -debug -socks5 1080`
+- `linux udba=./rootfs.img root=/dev/udba rw init=/bin/bash eth0=slirp,,/path/to/slirp.sh`
+
+if start a http server in user mode linux `nginx`, and outside:
+
+```
+$ curl --socks5 127.0.0.1:1080 http://10.0.2.15
+```
+
 ## known issues and future work
 
 - [ ] no ipv6 support yet
@@ -26,7 +37,8 @@ $ curl https://www.google.com
 
 ## version 0.0.6
 
-- bugfix and support socks5 server for udp (cursor + claude 4)
+- improve packet processing in race condition (cursor + gemini 2.5)
+- handle tcp fin improving and support socks5 server for udp (cursor + claude 4)
 
 - support socks5 server
 - manually integration with tcp framework

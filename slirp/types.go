@@ -97,6 +97,7 @@ type TcpState struct {
 	inBusy     bool
 	targetIP   uint32
 	targetPort int
+	packetQ    chan []byte // Packet queue for sequential processing
 	// Retransmission and timeout fields
 	lastPacket    []byte
 	lastPacketSeq uint32

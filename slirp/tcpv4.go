@@ -111,39 +111,52 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 		item.done = make(chan bool)
 		item.state = &TcpState{}
 		item.state.value = TcpStateClosed
+		item.state.packetQ = make(chan []byte, 100) // Buffer for 100 packets
 		item.disposed = false
 		cm.data[*key] = item
+		go item.processTcpPacketQ(&iphdr)
 	}
-	payloadN := len(payload)
-	debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
-	switch item.state.value {
-	case TcpStateClosed:
-		if tcphdr.Flags&SYN != 0 {
-			item.HandleTcpClnSYN(&iphdr, &tcphdr)
-		}
-	case TcpStateInit:
-		if tcphdr.Flags&ACK != 0 {
+	item.state.packetQ <- packet
+	return key, item, tcphdr, payload, nil
+}
+
+func (cv *ConnVal) processTcpPacketQ(iphdr *IPHeader) {
+	for packet := range cv.state.packetQ {
+		tcphdr, payload := parseTCPHeader(packet)
+		payloadN := len(payload)
+		debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
+
+		cv.lock.Lock()
+		stateValue := cv.state.value
+		cv.lock.Unlock()
+
+		switch stateValue {
+		case TcpStateClosed:
 			if tcphdr.Flags&SYN != 0 {
-				item.HandleTcpClnSYNACK(&iphdr, &tcphdr)
-			} else {
-				item.HandleTcpClnACK(&iphdr, &tcphdr)
+				cv.HandleTcpClnSYN(iphdr, &tcphdr)
 			}
-		} // -> server: TcpStateSynReceived, client: TcpStateEstablished
-	case TcpStateEstablished:
-		if payloadN > 0 {
-			item.HandleTcpClnData(&iphdr, &tcphdr, payload)
-		} else if tcphdr.Flags&FIN != 0 {
-			item.HandleTcpClnFIN(&iphdr, &tcphdr)
-		} else if tcphdr.Flags&ACK != 0 {
-			item.HandleTcpClnACK(&iphdr, &tcphdr)
+		case TcpStateInit:
+			if tcphdr.Flags&ACK != 0 {
+				if tcphdr.Flags&SYN != 0 {
+					cv.HandleTcpClnSYNACK(iphdr, &tcphdr)
+				} else {
+					cv.HandleTcpClnACK(iphdr, &tcphdr)
+				}
+			} // -> server: TcpStateSynReceived, client: TcpStateEstablished
+		case TcpStateEstablished:
+			if payloadN > 0 {
+				cv.HandleTcpClnData(iphdr, &tcphdr, payload)
+			} else if tcphdr.Flags&FIN != 0 {
+				cv.HandleTcpClnFIN(iphdr, &tcphdr)
+			} else if tcphdr.Flags&ACK != 0 {
+				cv.HandleTcpClnACK(iphdr, &tcphdr)
+			}
+		case TcpStateFinWait1:
+			// FIN, server: TcpStateFinWait2
+			cv.HandleTcpClnFIN2(iphdr, &tcphdr)
+			// -> TcpStateClosed
 		}
-	case TcpStateFinWait1:
-		// FIN, server: TcpStateFinWait2
-		item.HandleTcpClnFIN2(&iphdr, &tcphdr)
-		// -> TcpStateClosed
 	}
-	return key, item, tcphdr, payload, nil
-	return key, item, tcphdr, payload, nil
 }
 
 func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
@@ -358,8 +371,15 @@ func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 		cv.resetRetransmissionTimer()
 	}
 
-	cv.state.clientSeq = tcphdr.SeqNum
-	cv.state.serverSeq = tcphdr.AckNum
+	if cv.state.clientSeq == tcphdr.SeqNum {
+		// This is a pure ACK, no data
+		if tcphdr.AckNum > cv.state.serverSeq {
+			cv.state.serverSeq = tcphdr.AckNum
+		}
+	} else {
+		// ACK with data, let HandleTcpClnData handle it
+		return
+	}
 
 	if cv.state.value == TcpStateEstablished {
 		cv.state.inBusy = false
