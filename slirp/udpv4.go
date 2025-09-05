@@ -61,6 +61,99 @@ func GenerateIpUdpPacket(origIPHeader *IPHeader, origUDPHeader *UDPHeader, respo
 	return packet
 }
 
+// SendUDPResponseToSocks5 sends a UDP response back to a SOCKS5 client
+func SendUDPResponseToSocks5(socks5Server interface{}, srcIP net.IP, srcPort uint16, dstIP net.IP, dstPort uint16, payload []byte) {
+	// This function will be called from connval.go handleUdpResponse
+	// when we detect that the response should go to a SOCKS5 client
+
+	if server, ok := socks5Server.(*Socks5Server); ok {
+		// Create SOCKS5 UDP response header
+		// +----+------+------+----------+----------+----------+
+		// |RSV | FRAG | ATYP | SRC.ADDR | SRC.PORT |   DATA   |
+		// +----+------+------+----------+----------+----------+
+		// | 2  |  1   |  1   | Variable |    2     | Variable |
+		// +----+------+------+----------+----------+----------+
+
+		var response []byte
+		response = append(response, 0, 0, 0) // RSV (2 bytes) + FRAG (1 byte)
+
+		if srcIP.To4() != nil {
+			// IPv4
+			response = append(response, SOCKS5_ATYP_IPV4)
+			response = append(response, srcIP.To4()...)
+		} else {
+			// IPv6
+			response = append(response, SOCKS5_ATYP_IPV6)
+			response = append(response, srcIP.To16()...)
+		}
+
+		// Add source port
+		portBytes := make([]byte, 2)
+		binary.BigEndian.PutUint16(portBytes, srcPort)
+		response = append(response, portBytes...)
+
+		// Add payload
+		response = append(response, payload...)
+
+		// Send back to client
+		clientAddr := &net.UDPAddr{
+			IP:   dstIP, // The original client IP (now destination)
+			Port: int(dstPort),
+		}
+
+		_, err := server.udpListener.WriteToUDP(response, clientAddr)
+		if err != nil {
+			debugPrintf("[E] Failed to send UDP response to SOCKS5 client: %v\r\n", err)
+		} else {
+			debugPrintf("[I] Sent UDP response to SOCKS5 client %s:%d\r\n", dstIP, dstPort)
+		}
+	}
+}
+
+func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
+	buffer := make([]byte, 65535)
+	for {
+		select {
+		case <-cv.done:
+			return
+		default:
+			// Read response
+			cv.lock.Lock()
+			cv.UDPcln.SetReadDeadline(time.Now().Add(1 * time.Second))
+			n, err := cv.UDPcln.Read(buffer)
+			if err != nil {
+				cv.lock.Unlock()
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				cv.Dispose()
+				return
+			}
+			cv.lastActivity = time.Now()
+			response := buffer[:n]
+			debugPrintf("[D] UDP response\r\n")
+			debugDumpPacket(response)
+
+			// Check if this should go to a SOCKS5 client
+			// If the destination IP is from our internal gateway range, it might be a SOCKS5 client
+			dstIP := net.IP(iphdr.SrcIP[:])
+			srcIP := net.IP(iphdr.DstIP[:])
+
+			// Check if this is a response that should go to SOCKS5
+			if socks5Server != nil && dstIP.Equal(net.ParseIP("10.0.2.1")) {
+				// This is likely a response to a SOCKS5 UDP request
+				SendUDPResponseToSocks5(socks5Server, srcIP, udphdr.DstPort, dstIP, udphdr.SrcPort, response)
+			} else {
+				// Normal UDP response - construct response packet
+				ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
+				encoded := encodeSLIP(ret)
+				go seqPrintPacket(encoded)
+			}
+			cv.lock.Unlock()
+		}
+	}
+}
+
 func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
 	udphdr, payload := parseUdpHeader(packet)
 	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
@@ -100,8 +193,9 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 			return key, item, udphdr, payload, fmt.Errorf("failed to dial UDP: %v", err)
 		}
 		item = &ConnVal{}
-		item.Type = 200
+		item.Type = ConnTypeUdpClient
 		item.Key = &key
+		item.container = cm
 		item.UDPcln = udpConn
 		item.lastActivity = time.Now()
 		item.done = make(chan bool)

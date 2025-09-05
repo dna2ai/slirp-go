@@ -22,10 +22,11 @@ $ curl https://www.google.com
 ## known issues and future work
 
 - [ ] no ipv6 support yet
-- [ ] no UDP server support yet
 - [ ] add test
 
 ## version 0.0.6
+
+- bugfix and support socks5 server for udp (cursor + claude 4)
 
 - support socks5 server
 - manually integration with tcp framework

@@ -44,4 +44,10 @@ const (
 
 	UDP_HEADER_LEN = 8
 	UDP_TIMEOUT    = 30 * time.Second
+
+	// TCP timeout constants
+	TCP_INITIAL_RTO    = 1 * time.Second
+	TCP_MAX_RTO        = 60 * time.Second
+	TCP_MAX_RETRIES    = 3
+	TCP_KEEPALIVE_TIME = 2 * time.Hour
 )

@@ -106,6 +106,7 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 		item = &ConnVal{}
 		item.Type = ConnTypeTcpClient
 		item.Key = key
+		item.container = cm
 		item.lastActivity = time.Now()
 		item.done = make(chan bool)
 		item.state = &TcpState{}
@@ -142,6 +143,7 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 		// -> TcpStateClosed
 	}
 	return key, item, tcphdr, payload, nil
+	return key, item, tcphdr, payload, nil
 }
 
 func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
@@ -153,14 +155,18 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		n, err := cv.TCPcln.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
-				// TODO: wrong processing, should mark closing and wait for cv.actTcpResponse, then send FIN|ACK
+				// Properly handle EOF - remote side closed connection
+				debugPrintf("[I] TCP EOF from remote, initiating FIN sequence to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 				cv.lock.Lock()
+				cv.state.closingState = true
+				// Send any remaining data first
 				if cv.state.inQ.Len() == 0 || len(cv.state.inQ.Back().Value.([]byte)) > 0 {
-					cv.state.inQ.PushBack([]byte{})
+					cv.state.inQ.PushBack([]byte{}) // Empty slice signals FIN
 				}
 				cv.lock.Unlock()
+				go cv.actTcpResponse(iphdr, tcphdr) // This will send FIN
 			} else {
-				debugPrintf("[I] TCP read RST packet to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
+				debugPrintf("[I] TCP read error, sending RST to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
 				cv.Dispose()
 				ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, tcphdr.Window, 0, nil)
 				encoded := encodeSLIP(ret)
@@ -197,8 +203,8 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	if maxPayloadByWindow < maxPayloadSize {
 		maxPayloadSize = maxPayloadByWindow
 	}
-	if maxPayloadSize <= 0 {
-		// wait for window available
+	if maxPayloadSize <= 0 && !cv.state.closingState {
+		// wait for window available (but allow FIN to be sent)
 		cv.state.inBusy = false
 		return
 	}
@@ -215,17 +221,42 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		data = data[cv.state.inOffset : cv.state.inOffset+L]
 		cv.state.inOffset += L
 	}
-	if L == 0 {
+
+	// Check if this is a FIN signal (empty data and closing state)
+	var flags uint8 = PSH | ACK
+	if L == 0 && cv.state.closingState {
+		// Send FIN|ACK to initiate close
+		flags = FIN | ACK
+		debugPrintf("[I] Sending FIN|ACK to client due to EOF from remote\r\n")
+		cv.state.value = TcpStateFinWait1
+	} else if L == 0 {
 		cv.state.inBusy = false
 		return
 	}
-	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, PSH|ACK, 65535, 0, data)
+
+	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, flags, 65535, 0, data)
 	debugPrintf("[I] forward slice read (+%d -> %d)/%d | %d ...\r\n", L, cv.state.inOffset, n, cv.state.inQ.Len())
 	debugDumpPacket(ret)
+
+	// Store packet for potential retransmission
+	cv.state.lastPacket = ret
+	cv.state.lastPacketSeq = cv.state.serverSeq
+	cv.state.lastSendTime = time.Now()
+	cv.state.retryCount = 0
+	if cv.state.rto == 0 {
+		cv.state.rto = TCP_INITIAL_RTO
+	}
+
 	cv.state.serverSeq += uint32(L)
+	if flags&FIN != 0 {
+		cv.state.serverSeq++ // FIN consumes a sequence number
+	}
 	cv.lastActivity = time.Now()
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
+
+	// Start retransmission timer if not already running
+	go cv.startRetransmissionTimer(iphdr, tcphdr)
 }
 
 func (cv *ConnVal) HandleTcpClnData(iphdr *IPHeader, tcphdr *TCPHeader, payload []byte) {
@@ -265,7 +296,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", net.IP(iphdr.DstIP[:]), tcphdr.DstPort), 5*time.Second)
 	if err != nil {
 		debugPrintf("[I] TCP ACK-RST packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
-		ret := GenerateIpTcpPacket(iphdr, tcphdr, 0, tcphdr.SeqNum, ACK|RST, 0, 0, nil)
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, 0, tcphdr.SeqNum+1, ACK|RST, 0, 0, nil)
 		encoded := encodeSLIP(ret)
 		go seqPrintPacket(encoded)
 		return
@@ -279,11 +310,21 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inQ = list.New()
 	cv.state.inOffset = 0
 	cv.state.inBusy = false
+	cv.state.closingState = false
+	cv.state.rto = TCP_INITIAL_RTO
 	cv.lastActivity = time.Now()
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, tcphdr.Window, 0, nil)
+
+	// Store packet for retransmission
+	cv.state.lastPacket = ret
+	cv.state.lastPacketSeq = cv.state.serverSeq
+	cv.state.lastSendTime = time.Now()
+	cv.state.retryCount = 0
+
 	cv.state.serverSeq++
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
+	go cv.startRetransmissionTimer(iphdr, tcphdr)
 	go cv.handleTcpResponse(iphdr, tcphdr)
 }
 
@@ -310,8 +351,16 @@ func (cv *ConnVal) HandleTcpClnACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP ACK packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
+
+	// Check if this ACK acknowledges our sent data
+	if cv.state.lastPacket != nil && tcphdr.AckNum >= cv.state.lastPacketSeq {
+		// ACK received, reset retransmission timer
+		cv.resetRetransmissionTimer()
+	}
+
 	cv.state.clientSeq = tcphdr.SeqNum
 	cv.state.serverSeq = tcphdr.AckNum
+
 	if cv.state.value == TcpStateEstablished {
 		cv.state.inBusy = false
 		go cv.actTcpResponse(iphdr, tcphdr)
@@ -336,13 +385,18 @@ func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
-	cv.container.Pop(cv.key)
-	//cv.state.value = TcpStateClosing
+
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|FIN, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 	cv.state.serverSeq++
 	cv.state.value = TcpStateClosed
+
+	// Clean up the connection after sending final ACK|FIN
+	cv.Dispose()
+	if cv.container != nil {
+		cv.container.Pop(cv.Key)
+	}
 }
 
 func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
@@ -354,4 +408,60 @@ func (cv *ConnVal) HandleTcpClnRST(iphdr *IPHeader, tcphdr *TCPHeader) {
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
+
+	// Clean up immediately for RST
+	cv.Dispose()
+	if cv.container != nil {
+		cv.container.Pop(cv.Key)
+	}
+}
+
+// startRetransmissionTimer starts a timer for packet retransmission
+func (cv *ConnVal) startRetransmissionTimer(iphdr *IPHeader, tcphdr *TCPHeader) {
+	time.Sleep(cv.state.rto)
+
+	cv.lock.Lock()
+	defer cv.lock.Unlock()
+
+	// Check if we still need to retransmit
+	if cv.disposed || cv.state.lastPacket == nil {
+		return
+	}
+
+	// Check if ACK was received (sequence number advanced)
+	if time.Since(cv.state.lastSendTime) < cv.state.rto {
+		return // ACK received, no need to retransmit
+	}
+
+	if cv.state.retryCount >= TCP_MAX_RETRIES {
+		debugPrintf("[E] TCP max retries reached, closing connection\r\n")
+		cv.Dispose()
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, RST, 65535, 0, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		return
+	}
+
+	// Retransmit the packet
+	cv.state.retryCount++
+	cv.state.rto = cv.state.rto * 2
+	if cv.state.rto > TCP_MAX_RTO {
+		cv.state.rto = TCP_MAX_RTO
+	}
+	cv.state.lastSendTime = time.Now()
+
+	debugPrintf("[I] TCP retransmitting packet (attempt %d)\r\n", cv.state.retryCount)
+	encoded := encodeSLIP(cv.state.lastPacket)
+	go seqPrintPacket(encoded)
+
+	// Schedule next retransmission
+	go cv.startRetransmissionTimer(iphdr, tcphdr)
+}
+
+// resetRetransmissionTimer resets the retransmission state when ACK is received
+func (cv *ConnVal) resetRetransmissionTimer() {
+	cv.state.lastPacket = nil
+	cv.state.retryCount = 0
+	cv.state.rto = TCP_INITIAL_RTO
+	cv.state.lastSendTime = time.Time{}
 }

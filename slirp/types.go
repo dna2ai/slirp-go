@@ -97,6 +97,13 @@ type TcpState struct {
 	inBusy     bool
 	targetIP   uint32
 	targetPort int
+	// Retransmission and timeout fields
+	lastPacket    []byte
+	lastPacketSeq uint32
+	lastSendTime  time.Time
+	retryCount    int
+	rto           time.Duration // Retransmission timeout
+	closingState  bool          // Indicates if we're in closing process
 }
 
 type ConnMap struct {

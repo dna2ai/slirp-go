@@ -1,7 +1,6 @@
 package slirp
 
 import (
-	"net"
 	"time"
 )
 
@@ -16,9 +15,29 @@ func (cv *ConnVal) IsTimeout(now *time.Time) bool {
 	var timeoutT time.Duration
 	switch cv.Type {
 	case ConnTypeTcpClient:
-		timeoutT = 24 * 3600 * time.Second
+		// Use different timeouts based on connection state
+		if cv.state != nil {
+			switch cv.state.value {
+			case TcpStateClosed, TcpStateFinWait1, TcpStateFinWait2, TcpStateClosing:
+				timeoutT = 30 * time.Second // Shorter timeout for closing connections
+			default:
+				timeoutT = TCP_KEEPALIVE_TIME // Use keepalive time for established connections
+			}
+		} else {
+			timeoutT = TCP_KEEPALIVE_TIME
+		}
 	case ConnTypeTcpServer:
-		timeoutT = 24 * 3600 * time.Second
+		// Same logic for server connections
+		if cv.state != nil {
+			switch cv.state.value {
+			case TcpStateClosed, TcpStateFinWait1, TcpStateFinWait2, TcpStateClosing:
+				timeoutT = 30 * time.Second
+			default:
+				timeoutT = TCP_KEEPALIVE_TIME
+			}
+		} else {
+			timeoutT = TCP_KEEPALIVE_TIME
+		}
 	case ConnTypeUdpClient:
 		timeoutT = 30 * time.Second
 	case ConnTypeUdpServer:
@@ -42,39 +61,6 @@ func (cv *ConnVal) Close() {
 		if cv.UDPcln != nil {
 			cv.UDPcln.Close()
 			cv.UDPcln = nil
-		}
-	}
-}
-
-func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
-	buffer := make([]byte, 65535)
-	for {
-		select {
-		case <-cv.done:
-			return
-		default:
-			// Read response
-			cv.lock.Lock()
-			cv.UDPcln.SetReadDeadline(time.Now().Add(1 * time.Second))
-			n, err := cv.UDPcln.Read(buffer)
-			if err != nil {
-				cv.lock.Unlock()
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-				cv.Dispose()
-				return
-			}
-			cv.lastActivity = time.Now()
-			response := buffer[:n]
-			debugPrintf("[D] UDP response\r\n")
-			debugDumpPacket(response)
-
-			// Construct response packet
-			ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
-			encoded := encodeSLIP(ret)
-			go seqPrintPacket(encoded)
-			cv.lock.Unlock()
 		}
 	}
 }
