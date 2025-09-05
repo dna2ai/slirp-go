@@ -19,8 +19,13 @@ const (
 	TcpStateInit = iota
 	TcpStateSynReceived
 	TcpStateEstablished
+	// Active close
 	TcpStateFinWait1
 	TcpStateFinWait2
+	// Passive close
+	TcpStateCloseWait
+	TcpStateLastAck
+	// Simultaneous close
 	TcpStateClosing
 	TcpStateClosed
 )

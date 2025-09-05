@@ -79,6 +79,10 @@ func getTcpStateName(state int) string {
 		return "FIN_WAIT_1"
 	case TcpStateFinWait2:
 		return "FIN_WAIT_2"
+	case TcpStateCloseWait:
+		return "CLOSE_WAIT"
+	case TcpStateLastAck:
+		return "LAST_ACK"
 	case TcpStateClosing:
 		return "CLOSING"
 	case TcpStateClosed:

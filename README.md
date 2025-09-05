@@ -37,6 +37,7 @@ $ curl --socks5 127.0.0.1:1080 http://10.0.2.15
 
 ## version 0.0.6
 
+- optimize socks connection and tcp state machine (cursor + gemini 2.5)
 - improve packet processing in race condition (cursor + gemini 2.5)
 - handle tcp fin improving and support socks5 server for udp (cursor + claude 4)
 

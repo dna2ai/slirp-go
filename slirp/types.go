@@ -59,6 +59,11 @@ type TCPHeader struct {
 	Urgent     uint16
 }
 
+type packetAndHeader struct {
+	iphdr  IPHeader
+	packet []byte
+}
+
 // UDPHeader represents a UDP header
 type UDPHeader struct {
 	SrcPort  uint16
@@ -97,7 +102,7 @@ type TcpState struct {
 	inBusy     bool
 	targetIP   uint32
 	targetPort int
-	packetQ    chan []byte // Packet queue for sequential processing
+	packetQ    chan packetAndHeader // Packet queue for sequential processing
 	// Retransmission and timeout fields
 	lastPacket    []byte
 	lastPacketSeq uint32

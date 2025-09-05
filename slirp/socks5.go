@@ -287,6 +287,7 @@ func (s *Socks5Server) createVirtualConnection(addr string, port uint16, clientC
 	item.state = &TcpState{}
 	//item.state.value = TcpStateClosed
 	item.state.value = TcpStateInit
+	item.state.packetQ = make(chan packetAndHeader, 100)
 	// here serverSeq means remote seq, it is client
 	// clientSeq means local seq, it is server
 	item.state.serverSeq = rand.Uint32()
@@ -299,6 +300,7 @@ func (s *Socks5Server) createVirtualConnection(addr string, port uint16, clientC
 	item.state.targetIP = binary.BigEndian.Uint32(targetIPv4)
 	item.state.targetPort = int(port)
 
+	go item.processTcpPacketQ()
 	synPacket, key := s.generateSYNToServer(item, clientConn)
 	item.state.clientSeq++
 	item.Key = key

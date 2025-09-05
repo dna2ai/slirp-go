@@ -111,17 +111,20 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 		item.done = make(chan bool)
 		item.state = &TcpState{}
 		item.state.value = TcpStateClosed
-		item.state.packetQ = make(chan []byte, 100) // Buffer for 100 packets
+		item.state.packetQ = make(chan packetAndHeader, 100) // Buffer for 100 packets
 		item.disposed = false
 		cm.data[*key] = item
-		go item.processTcpPacketQ(&iphdr)
+		go item.processTcpPacketQ()
 	}
-	item.state.packetQ <- packet
+	item.state.packetQ <- packetAndHeader{iphdr: iphdr, packet: packet}
 	return key, item, tcphdr, payload, nil
 }
 
-func (cv *ConnVal) processTcpPacketQ(iphdr *IPHeader) {
-	for packet := range cv.state.packetQ {
+func (cv *ConnVal) processTcpPacketQ() {
+	for ph := range cv.state.packetQ {
+		iphdr := ph.iphdr
+		packet := ph.packet
+
 		tcphdr, payload := parseTCPHeader(packet)
 		payloadN := len(payload)
 		debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
@@ -133,28 +136,50 @@ func (cv *ConnVal) processTcpPacketQ(iphdr *IPHeader) {
 		switch stateValue {
 		case TcpStateClosed:
 			if tcphdr.Flags&SYN != 0 {
-				cv.HandleTcpClnSYN(iphdr, &tcphdr)
+				cv.HandleTcpClnSYN(&iphdr, &tcphdr)
 			}
 		case TcpStateInit:
 			if tcphdr.Flags&ACK != 0 {
 				if tcphdr.Flags&SYN != 0 {
-					cv.HandleTcpClnSYNACK(iphdr, &tcphdr)
+					cv.HandleTcpClnSYNACK(&iphdr, &tcphdr)
 				} else {
-					cv.HandleTcpClnACK(iphdr, &tcphdr)
+					cv.HandleTcpClnACK(&iphdr, &tcphdr)
 				}
 			} // -> server: TcpStateSynReceived, client: TcpStateEstablished
 		case TcpStateEstablished:
 			if payloadN > 0 {
-				cv.HandleTcpClnData(iphdr, &tcphdr, payload)
+				cv.HandleTcpClnData(&iphdr, &tcphdr, payload)
 			} else if tcphdr.Flags&FIN != 0 {
-				cv.HandleTcpClnFIN(iphdr, &tcphdr)
+				cv.HandleTcpClnFIN(&iphdr, &tcphdr)
 			} else if tcphdr.Flags&ACK != 0 {
-				cv.HandleTcpClnACK(iphdr, &tcphdr)
+				cv.HandleTcpClnACK(&iphdr, &tcphdr)
 			}
 		case TcpStateFinWait1:
-			// FIN, server: TcpStateFinWait2
-			cv.HandleTcpClnFIN2(iphdr, &tcphdr)
-			// -> TcpStateClosed
+			if tcphdr.Flags&ACK != 0 {
+				cv.lock.Lock()
+				cv.state.value = TcpStateFinWait2
+				cv.lock.Unlock()
+				debugPrintf("[I] TCP state transition to FIN_WAIT_2\r\n")
+			}
+		case TcpStateFinWait2:
+			if tcphdr.Flags&FIN != 0 {
+				cv.HandleTcpClnFIN(&iphdr, &tcphdr)
+			}
+		case TcpStateCloseWait:
+			// The client should not be sending any more data.
+			// We are waiting for the server to close.
+			break
+		case TcpStateLastAck:
+			if tcphdr.Flags&ACK != 0 {
+				cv.lock.Lock()
+				cv.state.value = TcpStateClosed
+				cv.Dispose()
+				if cv.container != nil {
+					cv.container.Pop(cv.Key)
+				}
+				cv.lock.Unlock()
+				debugPrintf("[I] TCP connection closed (LAST_ACK)\r\n")
+			}
 		}
 	}
 }
@@ -171,13 +196,22 @@ func (cv *ConnVal) handleTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 				// Properly handle EOF - remote side closed connection
 				debugPrintf("[I] TCP EOF from remote, initiating FIN sequence to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 				cv.lock.Lock()
-				cv.state.closingState = true
-				// Send any remaining data first
-				if cv.state.inQ.Len() == 0 || len(cv.state.inQ.Back().Value.([]byte)) > 0 {
-					cv.state.inQ.PushBack([]byte{}) // Empty slice signals FIN
+				if cv.state.value == TcpStateEstablished {
+					// Active close from server side
+					cv.state.value = TcpStateFinWait1
+					ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
+					cv.state.serverSeq++
+					encoded := encodeSLIP(ret)
+					go seqPrintPacket(encoded)
+				} else if cv.state.value == TcpStateCloseWait {
+					// Passive close, we have received FIN from client, now server is done
+					cv.state.value = TcpStateLastAck
+					ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, FIN|ACK, 65535, 0, nil)
+					cv.state.serverSeq++
+					encoded := encodeSLIP(ret)
+					go seqPrintPacket(encoded)
 				}
 				cv.lock.Unlock()
-				go cv.actTcpResponse(iphdr, tcphdr) // This will send FIN
 			} else {
 				debugPrintf("[I] TCP read error, sending RST to %s:%d - %v\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort, err)
 				cv.Dispose()
@@ -393,29 +427,31 @@ func (cv *ConnVal) HandleTcpClnFIN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	debugPrintf("[I] TCP FIN packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
 	cv.lock.Lock()
 	defer cv.lock.Unlock()
-	cv.Close()
-	cv.state.value = TcpStateFinWait1
-	cv.state.clientSeq = tcphdr.SeqNum + 1
-	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK, 65535, 0, nil)
-	encoded := encodeSLIP(ret)
-	go seqPrintPacket(encoded)
-}
 
-func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
-	debugPrintf("[I] TCP FIN-2 packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), tcphdr.DstPort)
-	cv.lock.Lock()
-	defer cv.lock.Unlock()
-
-	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|FIN, 65535, 0, nil)
-	encoded := encodeSLIP(ret)
-	go seqPrintPacket(encoded)
-	cv.state.serverSeq++
-	cv.state.value = TcpStateClosed
-
-	// Clean up the connection after sending final ACK|FIN
-	cv.Dispose()
-	if cv.container != nil {
-		cv.container.Pop(cv.Key)
+	if cv.state.value == TcpStateEstablished {
+		// Client wants to close, move to CLOSE_WAIT
+		cv.state.value = TcpStateCloseWait
+		// Acknowledge the FIN
+		cv.state.clientSeq = tcphdr.SeqNum + 1
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK, 65535, 0, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		// Close the write half of the connection to the server
+		if cv.TCPcln != nil {
+			cv.TCPcln.CloseWrite()
+		}
+	} else if cv.state.value == TcpStateFinWait2 {
+		// This is the final ACK/FIN from the client
+		cv.state.clientSeq = tcphdr.SeqNum + 1
+		ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK, 65535, 0, nil)
+		encoded := encodeSLIP(ret)
+		go seqPrintPacket(encoded)
+		// Close connection
+		cv.state.value = TcpStateClosed
+		cv.Dispose()
+		if cv.container != nil {
+			cv.container.Pop(cv.Key)
+		}
 	}
 }
 
