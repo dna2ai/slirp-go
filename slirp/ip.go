@@ -18,3 +18,23 @@ func parseIPHeader(packet []byte) IPHeader {
 	copy(header.DstIP[:], packet[16:20])
 	return header
 }
+
+func (cm *ConnMap) BuildConnectionKey(iphdr *IPHeader, sport, dport int) *ConnKey {
+	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
+	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
+	if src > dst || (src == dst && sport > dport) {
+		tmp := src
+		tport := sport
+		src = dst
+		sport = dport
+		dst = tmp
+		dport = tport
+	}
+	ret := &ConnKey{
+		SrcIP:   src,
+		SrcPort: sport,
+		DstIP:   dst,
+		DstPort: dport,
+	}
+	return ret
+}

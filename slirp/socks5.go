@@ -284,6 +284,8 @@ func (s *Socks5Server) createVirtualConnection(addr string, port uint16, clientC
 	item.lastActivity = time.Now()
 	item.done = make(chan bool)
 	item.disposed = false
+	item.targetIP = binary.BigEndian.Uint32(targetIPv4)
+	item.targetPort = int(port)
 	item.state = &TcpState{}
 	//item.state.value = TcpStateClosed
 	item.state.value = TcpStateInit
@@ -297,8 +299,6 @@ func (s *Socks5Server) createVirtualConnection(addr string, port uint16, clientC
 	item.state.inBusy = false
 	item.state.closingState = false
 	item.state.rto = TCP_INITIAL_RTO
-	item.state.targetIP = binary.BigEndian.Uint32(targetIPv4)
-	item.state.targetPort = int(port)
 
 	go item.processTcpPacketQ()
 	synPacket, key := s.generateSYNToServer(item, clientConn)
@@ -346,9 +346,9 @@ func (s *Socks5Server) isInternalAddress(ip net.IP) bool {
 func (s *Socks5Server) generateSYNToServer(item *ConnVal, clientConn net.Conn) ([]byte, *ConnKey) {
 	srcIp, sport := getAddrInfo(clientConn.RemoteAddr())
 	srcIpv4 := srcIp.To4()
-	dstIp := getIpv4FromUint32(item.state.targetIP)
+	dstIp := getIpv4FromUint32(item.targetIP)
 	dstIpv4 := dstIp.To4()
-	dport := item.state.targetPort
+	dport := item.targetPort
 	var packet []byte
 	// Create IPv4 SYN packet
 	ipHeader := IPHeader{
@@ -374,7 +374,7 @@ func (s *Socks5Server) generateSYNToServer(item *ConnVal, clientConn net.Conn) (
 
 	packet = GenerateIpTcpPacket(&ipHeader, &tcpHeader,
 		item.state.serverSeq, item.state.clientSeq, SYN, 65535, 0, nil)
-	key := s.cm.BuildTcpConnectionKey(&ipHeader, dport, sport)
+	key := s.cm.BuildConnectionKey(&ipHeader, dport, sport)
 	debugPrintf("[I] SOCKS5 sending SYN to server %s:%d\r\n", dstIpv4, dport)
 	debugPrintf("[I] Created virtual server connection: %s:%d -> %s:%d\r\n",
 		srcIpv4, sport, dstIpv4, dport)
@@ -518,19 +518,43 @@ func (s *Socks5Server) createVirtualUDPPacket(targetIP net.IP, targetPort uint16
 		TTL:        64,
 	}
 
+	srcIp := clientAddr.IP
+	srcIpv4 := srcIp.To4()
+	if srcIpv4.IsLoopback() {
+		srcIp = net.ParseIP("10.0.2.1")
+		srcIpv4 = srcIp.To4()
+	}
 	// Use client's mapped internal IP as source
-	srcIP := net.ParseIP("10.0.2.1") // Default internal gateway
-	copy(ipHeader.SrcIP[:], srcIP.To4())
-	copy(ipHeader.DstIP[:], targetIP.To4())
+	copy(ipHeader.SrcIP[:], targetIP.To4())
+	copy(ipHeader.DstIP[:], srcIpv4)
 
 	// Create UDP header
 	udpHeader := UDPHeader{
-		SrcPort: uint16(clientAddr.Port),
-		DstPort: targetPort,
+		SrcPort: targetPort,
+		DstPort: uint16(clientAddr.Port),
 	}
+
+	key := s.cm.BuildConnectionKey(&ipHeader, int(targetPort), clientAddr.Port)
+	s.cm.mu.Lock()
+	item, exists := s.cm.data[*key]
+	if !exists {
+		item = &ConnVal{}
+		item.Type = ConnTypeUdpServer
+		item.UDPcln = nil
+		item.container = s.cm
+		item.done = make(chan bool)
+		item.targetIP = binary.BigEndian.Uint32(clientAddr.IP.To4())
+		item.targetPort = int(clientAddr.Port)
+		item.Key = key
+		s.cm.data[*key] = item
+	}
+	item.disposed = false
+	item.lastActivity = time.Now()
+	s.cm.mu.Unlock()
 
 	// Generate the complete UDP packet
 	udpPacket := GenerateIpUdpPacket(&ipHeader, &udpHeader, payload)
+	debugDumpPacket(udpPacket)
 
 	// Send to internal network via SLIP
 	encoded := encodeSLIP(udpPacket)

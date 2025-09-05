@@ -134,80 +134,61 @@ func (cv *ConnVal) handleUdpResponse(iphdr IPHeader, udphdr UDPHeader) {
 			debugPrintf("[D] UDP response\r\n")
 			debugDumpPacket(response)
 
-			// Check if this should go to a SOCKS5 client
-			// If the destination IP is from our internal gateway range, it might be a SOCKS5 client
-			dstIP := net.IP(iphdr.SrcIP[:])
-			srcIP := net.IP(iphdr.DstIP[:])
-
-			// Check if this is a response that should go to SOCKS5
-			if socks5Server != nil && dstIP.Equal(net.ParseIP("10.0.2.1")) {
-				// This is likely a response to a SOCKS5 UDP request
-				SendUDPResponseToSocks5(socks5Server, srcIP, udphdr.DstPort, dstIP, udphdr.SrcPort, response)
-			} else {
-				// Normal UDP response - construct response packet
-				ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
-				encoded := encodeSLIP(ret)
-				go seqPrintPacket(encoded)
-			}
+			// Normal UDP response - construct response packet
+			ret := GenerateIpUdpPacket(&iphdr, &udphdr, response)
+			encoded := encodeSLIP(ret)
+			go seqPrintPacket(encoded)
 			cv.lock.Unlock()
 		}
 	}
 }
 
-func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey, *ConnVal, UDPHeader, []byte, error) {
+func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (*ConnKey, *ConnVal, UDPHeader, []byte, error) {
 	udphdr, payload := parseUdpHeader(packet)
 	dstIPStr := net.IP(iphdr.DstIP[:]).String()
 	if dstIPStr == "10.0.2.15" || dstIPStr == "127.0.0.1" {
-		return ConnKey{}, nil, udphdr, payload, nil
+		return nil, nil, udphdr, payload, nil
 	}
 
-	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
+	//src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
+	//dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
 	sport := int(udphdr.SrcPort)
-	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
 	dport := int(udphdr.DstPort)
-	addr := net.UDPAddr{
-		IP:   net.IP(iphdr.DstIP[:]),
-		Port: dport,
-	}
+	key := cm.BuildConnectionKey(&iphdr, sport, dport)
 
-	if (src & 0xffffff00) != GUEST_SUBNET {
-		addr.IP = net.IP(iphdr.SrcIP[:])
-		addr.Port = sport
-		tmp := src
-		tport := sport
-		src = dst
-		sport = dport
-		dst = tmp
-		dport = tport
-	}
-	key := ConnKey{
-		SrcIP:   src,
-		SrcPort: sport,
-		DstIP:   dst,
-		DstPort: dport,
-	}
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
-	item, exists := cm.data[key]
+	item, exists := cm.data[*key]
 	if exists {
 		debugPrintf("udp: using exists key ...\r\n")
 		item.lastActivity = time.Now()
 	} else {
 		debugPrintf("udp: using new key ...\r\n")
+		addr := net.UDPAddr{
+			IP:   net.IP(iphdr.DstIP[:]),
+			Port: dport,
+		}
 		udpConn, err := net.DialUDP("udp", nil, &addr)
 		if err != nil {
 			return key, item, udphdr, payload, fmt.Errorf("failed to dial UDP: %v", err)
 		}
 		item = &ConnVal{}
 		item.Type = ConnTypeUdpClient
-		item.Key = &key
+		item.Key = key
 		item.container = cm
 		item.UDPcln = udpConn
 		item.lastActivity = time.Now()
 		item.done = make(chan bool)
 		item.disposed = false
-		cm.data[key] = item
+		cm.data[*key] = item
 		go item.handleUdpResponse(iphdr, udphdr)
+	}
+
+	if item.Type == ConnTypeUdpServer {
+		dstIP := getIpv4FromUint32(item.targetIP)
+		debugPrintf("[D] UDP server response to %s:%d\r\n", dstIP, item.targetPort)
+		SendUDPResponseToSocks5(socks5Server, net.IP(iphdr.SrcIP[:]), udphdr.SrcPort, dstIP, uint16(item.targetPort), payload)
+		return key, item, udphdr, payload, nil
 	}
 
 	debugPrintf("[I] Forwarding UDP packet to %s:%d\r\n", net.IP(iphdr.DstIP[:]), udphdr.DstPort)

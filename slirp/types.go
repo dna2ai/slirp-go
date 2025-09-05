@@ -92,6 +92,8 @@ type ConnVal struct {
 	lock         sync.Mutex
 	disposed     bool
 	state        *TcpState
+	targetIP     uint32
+	targetPort   int
 }
 
 type TcpState struct {
@@ -101,8 +103,6 @@ type TcpState struct {
 	inQ        *list.List
 	inOffset   int
 	inBusy     bool
-	targetIP   uint32
-	targetPort int
 	packetQ    chan packetAndHeader // Packet queue for sequential processing
 	// Retransmission and timeout fields
 	lastPacket    []byte

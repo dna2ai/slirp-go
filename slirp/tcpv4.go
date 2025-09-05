@@ -118,31 +118,11 @@ func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNu
 	return append(ipHeader, tcpData...)
 }
 
-func (cm *ConnMap) BuildTcpConnectionKey(iphdr *IPHeader, sport, dport int) *ConnKey {
-	src := binary.BigEndian.Uint32(iphdr.SrcIP[:])
-	dst := binary.BigEndian.Uint32(iphdr.DstIP[:])
-	if src > dst || (src == dst && sport > dport) {
-		tmp := src
-		tport := sport
-		src = dst
-		sport = dport
-		dst = tmp
-		dport = tport
-	}
-	ret := &ConnKey{
-		SrcIP:   src,
-		SrcPort: sport,
-		DstIP:   dst,
-		DstPort: dport,
-	}
-	return ret
-}
-
 func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey, *ConnVal, TCPHeader, []byte, error) {
 	tcphdr, payload := parseTCPHeader(packet)
 	sport := int(tcphdr.SrcPort)
 	dport := int(tcphdr.DstPort)
-	key := cm.BuildTcpConnectionKey(&iphdr, sport, dport)
+	key := cm.BuildConnectionKey(&iphdr, sport, dport)
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
 	item, exists := cm.data[*key]
