@@ -2,8 +2,8 @@ package slirp
 
 import (
 	"encoding/binary"
-	"syscall"
 	"fmt"
+	"syscall"
 )
 
 func generateICMPResponse(originalIPHeader *IPHeader, icmpResponse []byte) []byte {
@@ -60,8 +60,8 @@ func generateICMPHostUnreachable(origIP IPHeader, origPacket []byte) []byte {
 	binary.BigEndian.PutUint16(response[2:4], uint16(totalLen))
 	binary.BigEndian.PutUint16(response[4:6], 0) // ID
 	binary.BigEndian.PutUint16(response[6:8], 0) // Flags and Fragment offset
-	response[8] = 64                              // TTL
-	response[9] = PROTO_ICMP                      // Protocol
+	response[8] = 64                             // TTL
+	response[9] = PROTO_ICMP                     // Protocol
 	// Checksum calculated later
 	copy(response[12:16], origIP.DstIP[:]) // Src IP (our IP is original dst)
 	copy(response[16:20], origIP.SrcIP[:]) // Dst IP
@@ -92,24 +92,24 @@ func generateICMPHostUnreachable(origIP IPHeader, origPacket []byte) []byte {
 }
 
 func processICMPPacket(iphdr IPHeader, packet []byte) ([]byte, error) {
-	ipHeaderLen := int(iphdr.VersionIHL & 0x0f) * 4
-	if len(packet) < ipHeaderLen + 8 {
+	ipHeaderLen := int(iphdr.VersionIHL&0x0f) * 4
+	if len(packet) < ipHeaderLen+8 {
 		return nil, fmt.Errorf("packet too small for ICMPheader")
 	}
 	icmpHeader := ICMPHeader{
 		Type:     packet[ipHeaderLen],
-		Code:     packet[ipHeaderLen + 1],
-		Checksum: binary.BigEndian.Uint16(packet[ipHeaderLen+2:ipHeaderLen+4]),
-		Unused:   binary.BigEndian.Uint32(packet[ipHeaderLen+4:ipHeaderLen+8]),
+		Code:     packet[ipHeaderLen+1],
+		Checksum: binary.BigEndian.Uint16(packet[ipHeaderLen+2 : ipHeaderLen+4]),
+		Unused:   binary.BigEndian.Uint32(packet[ipHeaderLen+4 : ipHeaderLen+8]),
 	}
 	icmpPayload := packet[ipHeaderLen+8:]
 	// TODO: verify packet icmp checksum
 	switch icmpHeader.Type {
 	case ICMP_ECHO_REQUEST:
 		dstIPuint32 := binary.BigEndian.Uint32(iphdr.DstIP[:])
-		if dstIPuint32 - 0x0a000200 == dstIPuint32 & 0xff {
-			debugPrintf("[D] ping intranet at 10.0.2.%d\r\n", dstIPuint32 & 0xff)
-			responseICMP :=packet[ipHeaderLen:]
+		if dstIPuint32-0x0a000200 == dstIPuint32&0xff {
+			debugPrintf("[D] ping intranet at 10.0.2.%d\r\n", dstIPuint32&0xff)
+			responseICMP := packet[ipHeaderLen:]
 			// heal icmp cmd type
 			responseICMP[0] = ICMP_ECHO_REPLY
 			binary.BigEndian.PutUint16(responseICMP[2:4], 0) // Zero checksum for calculation
@@ -195,4 +195,3 @@ func forwardICMPRequest(iphdr *IPHeader, icmpHeader *ICMPHeader, payload []byte)
 	// Generate the complete IP packet for the response
 	return generateICMPResponse(iphdr, responseICMP), nil
 }
-

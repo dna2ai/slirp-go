@@ -3,16 +3,16 @@ package slirp
 import (
 	"container/list"
 	"encoding/binary"
+	"fmt"
+	"io"
+	"math/rand"
 	"net"
 	"time"
-	"io"
-	"fmt"
-	"math/rand"
 )
 
 func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
 	// VersionIHL = packet[0]
-	i := int(packet[0] & 0x0f) * 4
+	i := int(packet[0]&0x0f) * 4
 	var header TCPHeader
 	header.SrcPort = binary.BigEndian.Uint16(packet[i : i+2])
 	header.DstPort = binary.BigEndian.Uint16(packet[i+2 : i+4])
@@ -30,14 +30,14 @@ func parseTCPHeader(packet []byte) (TCPHeader, []byte) {
 func GenerateIpTcpPacket(origIPHeader *IPHeader, origTCPHeader *TCPHeader, seqNum, ackNum uint32, flags uint8, window, id uint16, responsePayload []byte) []byte {
 	// IP header
 	ipHeader := make([]byte, 20)
-	ipHeader[0] = 0x45 // Version 4, IHL 5
-	ipHeader[1] = 0    // TOS
+	ipHeader[0] = 0x45                         // Version 4, IHL 5
+	ipHeader[1] = 0                            // TOS
 	totalLen := 20 + 20 + len(responsePayload) // IP + TCP + payload
 	binary.BigEndian.PutUint16(ipHeader[2:4], uint16(totalLen))
-	binary.BigEndian.PutUint16(ipHeader[4:6], id) // ID
-	ipHeader[6] = 0x40 // Don't fragment
-	ipHeader[8] = 64   // TTL
-	ipHeader[9] = 6    // TCP protocol
+	binary.BigEndian.PutUint16(ipHeader[4:6], id)  // ID
+	ipHeader[6] = 0x40                             // Don't fragment
+	ipHeader[8] = 64                               // TTL
+	ipHeader[9] = 6                                // TCP protocol
 	binary.BigEndian.PutUint16(ipHeader[10:12], 0) // checksume placeholder
 	copy(ipHeader[12:16], origIPHeader.DstIP[:])
 	copy(ipHeader[16:20], origIPHeader.SrcIP[:])
@@ -82,9 +82,9 @@ func (cm *ConnMap) BuildTcpConnectionKey(iphdr *IPHeader, sport, dport int) *Con
 		dport = tport
 	}
 	ret := &ConnKey{
-		SrcIP: src,
+		SrcIP:   src,
 		SrcPort: sport,
-		DstIP: dst,
+		DstIP:   dst,
 		DstPort: dport,
 	}
 	return ret
@@ -115,14 +115,14 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 	}
 	payloadN := len(payload)
 	debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
-	switch (item.state.value) {
+	switch item.state.value {
 	case TcpStateClosed:
-		if tcphdr.Flags & SYN != 0 {
+		if tcphdr.Flags&SYN != 0 {
 			item.HandleTcpClnSYN(&iphdr, &tcphdr)
 		}
 	case TcpStateInit:
-		if tcphdr.Flags & ACK != 0 {
-			if tcphdr.Flags & SYN != 0 {
+		if tcphdr.Flags&ACK != 0 {
+			if tcphdr.Flags&SYN != 0 {
 				item.HandleTcpClnSYNACK(&iphdr, &tcphdr)
 			} else {
 				item.HandleTcpClnACK(&iphdr, &tcphdr)
@@ -131,9 +131,9 @@ func (cm *ConnMap) ProcessTCPConnection(iphdr IPHeader, packet []byte) (*ConnKey
 	case TcpStateEstablished:
 		if payloadN > 0 {
 			item.HandleTcpClnData(&iphdr, &tcphdr, payload)
-		} else if tcphdr.Flags & FIN != 0 {
+		} else if tcphdr.Flags&FIN != 0 {
 			item.HandleTcpClnFIN(&iphdr, &tcphdr)
-		} else if tcphdr.Flags & ACK != 0 {
+		} else if tcphdr.Flags&ACK != 0 {
 			item.HandleTcpClnACK(&iphdr, &tcphdr)
 		}
 	case TcpStateFinWait1:
@@ -189,7 +189,7 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 		return
 	}
 	cv.state.inBusy = true
-	ipHeaderLen := int(iphdr.VersionIHL & 0x0f) * 4
+	ipHeaderLen := int(iphdr.VersionIHL&0x0f) * 4
 	tcpHeaderLen := 20
 	maxPayloadByMTU := config.MTU - ipHeaderLen - tcpHeaderLen
 	maxPayloadByWindow := int(tcphdr.Window)
@@ -206,13 +206,13 @@ func (cv *ConnVal) actTcpResponse(iphdr *IPHeader, tcphdr *TCPHeader) {
 	data := firstElem.Value.([]byte)
 	n := len(data)
 	L := maxPayloadSize
-	if cv.state.inOffset + maxPayloadSize > n {
+	if cv.state.inOffset+maxPayloadSize > n {
 		L = n - cv.state.inOffset
 		data = data[cv.state.inOffset:]
 		cv.state.inQ.Remove(firstElem)
 		cv.state.inOffset = 0
 	} else {
-		data = data[cv.state.inOffset:cv.state.inOffset+L]
+		data = data[cv.state.inOffset : cv.state.inOffset+L]
 		cv.state.inOffset += L
 	}
 	if L == 0 {
@@ -281,7 +281,7 @@ func (cv *ConnVal) HandleTcpClnSYN(iphdr *IPHeader, tcphdr *TCPHeader) {
 	cv.state.inBusy = false
 	cv.lastActivity = time.Now()
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|SYN, tcphdr.Window, 0, nil)
-        cv.state.serverSeq ++
+	cv.state.serverSeq++
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
 	go cv.handleTcpResponse(iphdr, tcphdr)
@@ -293,7 +293,7 @@ func (cv *ConnVal) HandleTcpClnSYNACK(iphdr *IPHeader, tcphdr *TCPHeader) {
 	defer cv.lock.Unlock()
 	cv.state.value = TcpStateEstablished
 	cv.state.serverSeq = tcphdr.AckNum
-	cv.state.clientSeq = tcphdr.SeqNum+1
+	cv.state.clientSeq = tcphdr.SeqNum + 1
 	cv.state.inQ = list.New()
 	cv.state.inOffset = 0
 	cv.state.inBusy = false
@@ -341,7 +341,7 @@ func (cv *ConnVal) HandleTcpClnFIN2(iphdr *IPHeader, tcphdr *TCPHeader) {
 	ret := GenerateIpTcpPacket(iphdr, tcphdr, cv.state.serverSeq, cv.state.clientSeq, ACK|FIN, 65535, 0, nil)
 	encoded := encodeSLIP(ret)
 	go seqPrintPacket(encoded)
-	cv.state.serverSeq ++
+	cv.state.serverSeq++
 	cv.state.value = TcpStateClosed
 }
 

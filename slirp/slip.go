@@ -62,4 +62,3 @@ func encodeSLIP(data []byte) []byte {
 	encoded = append(encoded, SLIP_END)
 	return encoded
 }
-

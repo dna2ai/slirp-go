@@ -1,13 +1,14 @@
 package slirp
 
 import (
-	"net"
-	"time"
-	"sync"
 	"container/list"
+	"net"
+	"sync"
+	"time"
 )
 
 type ConnType int
+
 const (
 	ConnTypeNone ConnType = iota
 	ConnTypeTcpClient
@@ -17,10 +18,9 @@ const (
 	ConnTypeUnknown
 )
 
-
 type SlirpConfig struct {
-	Debug bool
-	MTU   int
+	Debug      bool
+	MTU        int
 	Socks5Port int
 }
 
@@ -68,24 +68,24 @@ type UDPHeader struct {
 }
 
 type ConnKey struct {
-        SrcIP   uint32
-        SrcPort int
-        DstIP   uint32
-        DstPort int
+	SrcIP   uint32
+	SrcPort int
+	DstIP   uint32
+	DstPort int
 }
 
 type ConnVal struct {
-	Type ConnType
-	Key *ConnKey
+	Type   ConnType
+	Key    *ConnKey
 	UDPcln *net.UDPConn
 	TCPcln *net.TCPConn
 
-	container *ConnMap
+	container    *ConnMap
 	lastActivity time.Time
-	done chan bool
-	lock sync.Mutex
-	disposed bool
-	state *TcpState
+	done         chan bool
+	lock         sync.Mutex
+	disposed     bool
+	state        *TcpState
 }
 
 type TcpState struct {

@@ -1,20 +1,20 @@
 package slirp
 
 import (
-	"os"
-	"sync"
 	"bufio"
 	"flag"
 	"io"
+	"os"
+	"sync"
 )
 
 var (
-	printMutex sync.Mutex
+	printMutex     sync.Mutex
 	debugDumpMutex sync.Mutex
-	reader *bufio.Reader
-	writer *bufio.Writer
-	config *SlirpConfig
-	socks5Server *Socks5Server
+	reader         *bufio.Reader
+	writer         *bufio.Writer
+	config         *SlirpConfig
+	socks5Server   *Socks5Server
 )
 
 func Run() {
@@ -74,15 +74,15 @@ func Run() {
 			ipHeader.SrcIP, ipHeader.DstIP, ipHeader.Protocol)
 
 		var response []byte
-		if (ipHeader.Protocol == 6) { // TCP
+		if ipHeader.Protocol == 6 { // TCP
 			debugPrintf("[I] Sending TCP response\r\n")
 			go cm.ProcessTCPConnection(ipHeader, packet)
 			continue
-		} else if (ipHeader.Protocol == 17) { // UDP
+		} else if ipHeader.Protocol == 17 { // UDP
 			debugPrintf("[I] Sending UDP response\r\n")
 			go cm.ProcessUDPConnection(ipHeader, packet)
 			continue
-		} else if (ipHeader.Protocol == 1) { // ICMP
+		} else if ipHeader.Protocol == 1 { // ICMP
 			debugPrintf("[I] Sending ICMP response\r\n")
 			response, err = processICMPPacket(ipHeader, packet)
 			if err != nil {

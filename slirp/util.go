@@ -31,7 +31,6 @@ func calculateChecksum(data []byte) uint16 {
 	return uint16(^sum)
 }
 
-
 func calculateSubChecksum(srcIP [4]byte, dstIP [4]byte, protocol uint8, data []byte) uint16 {
 	pseudoHeader := make([]byte, 12)
 	copy(pseudoHeader[0:4], srcIP[:])
@@ -69,24 +68,24 @@ func getIpv4FromUint32(ip uint32) net.IP {
 }
 
 func getTcpStateName(state int) string {
-    switch state {
-    case TcpStateInit:
-        return "INIT"
-    case TcpStateSynReceived:
-        return "SYN_RECEIVED"
-    case TcpStateEstablished:
-        return "ESTABLISHED"
-    case TcpStateFinWait1:
-        return "FIN_WAIT_1"
-    case TcpStateFinWait2:
-        return "FIN_WAIT_2"
-    case TcpStateClosing:
-        return "CLOSING"
-    case TcpStateClosed:
-        return "CLOSED"
-    default:
-        return "UNKNOWN"
-    }
+	switch state {
+	case TcpStateInit:
+		return "INIT"
+	case TcpStateSynReceived:
+		return "SYN_RECEIVED"
+	case TcpStateEstablished:
+		return "ESTABLISHED"
+	case TcpStateFinWait1:
+		return "FIN_WAIT_1"
+	case TcpStateFinWait2:
+		return "FIN_WAIT_2"
+	case TcpStateClosing:
+		return "CLOSING"
+	case TcpStateClosed:
+		return "CLOSED"
+	default:
+		return "UNKNOWN"
+	}
 }
 
 func debugDumpPacket(data []byte) {

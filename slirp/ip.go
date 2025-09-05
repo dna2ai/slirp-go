@@ -18,4 +18,3 @@ func parseIPHeader(packet []byte) IPHeader {
 	copy(header.DstIP[:], packet[16:20])
 	return header
 }
-

@@ -41,4 +41,3 @@ func (cm *ConnMap) cleanup() {
 		cm.mu.Unlock()
 	}
 }
-

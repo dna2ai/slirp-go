@@ -6,23 +6,23 @@ import (
 
 // TCP flags
 const (
-    FIN = 0x01
-    SYN = 0x02
-    RST = 0x04
-    PSH = 0x08
-    ACK = 0x10
-    URG = 0x20
+	FIN = 0x01
+	SYN = 0x02
+	RST = 0x04
+	PSH = 0x08
+	ACK = 0x10
+	URG = 0x20
 )
 
 // Connection states
 const (
-    TcpStateInit = iota
-    TcpStateSynReceived
-    TcpStateEstablished
-    TcpStateFinWait1
-    TcpStateFinWait2
-    TcpStateClosing
-    TcpStateClosed
+	TcpStateInit = iota
+	TcpStateSynReceived
+	TcpStateEstablished
+	TcpStateFinWait1
+	TcpStateFinWait2
+	TcpStateClosing
+	TcpStateClosed
 )
 
 const (
@@ -38,10 +38,10 @@ const (
 
 	// ICMP types
 	ICMP_ECHO_REQUEST = 8
-	ICMP_ECHO_REPLY = 0
+	ICMP_ECHO_REPLY   = 0
 	ICMP_DEST_UNREACH = 3
 	ICMP_HOST_UNREACH = 1
 
 	UDP_HEADER_LEN = 8
-	UDP_TIMEOUT = 30 * time.Second
+	UDP_TIMEOUT    = 30 * time.Second
 )
