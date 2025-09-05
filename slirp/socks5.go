@@ -544,8 +544,12 @@ func (s *Socks5Server) monitorClientConnection(item *ConnVal, clientConn net.Con
 				_, err := tcpConn.Read(buffer)
 				tcpConn.SetReadDeadline(time.Time{}) // Reset deadline
 
-				if err != nil && err.Error() != "timeout" {
-					// Connection is closed, initiate proper cleanup
+				if err != nil {
+					if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+						// This is an expected timeout, continue monitoring.
+						continue
+					}
+					// Any other error (like EOF) means the connection is closed.
 					debugPrintf("[I] SOCKS5 client connection closed, cleaning up server connection\r\n")
 					item.lock.Lock()
 					if item.state.value == TcpStateEstablished {

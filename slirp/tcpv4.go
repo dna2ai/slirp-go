@@ -126,6 +126,13 @@ func (cv *ConnVal) processTcpPacketQ() {
 		packet := ph.packet
 
 		tcphdr, payload := parseTCPHeader(packet)
+
+		// Handle RST packets first, as they can occur in any state.
+		if tcphdr.Flags&RST != 0 {
+			cv.HandleTcpClnRST(&iphdr, &tcphdr)
+			return // Stop processing for this connection.
+		}
+
 		payloadN := len(payload)
 		debugPrintf("[I] TCP header: %+v\r\n", tcphdr)
 
@@ -168,6 +175,7 @@ func (cv *ConnVal) processTcpPacketQ() {
 		case TcpStateCloseWait:
 			// The client should not be sending any more data.
 			// We are waiting for the server to close.
+			// We continue to loop to handle potential RSTs.
 			break
 		case TcpStateLastAck:
 			if tcphdr.Flags&ACK != 0 {

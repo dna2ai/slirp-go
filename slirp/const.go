@@ -30,6 +30,11 @@ const (
 	TcpStateClosed
 )
 
+// Guest network configuration
+const (
+	GUEST_SUBNET = 0x0a000200
+)
+
 const (
 	SLIP_END     = 0xC0
 	SLIP_ESC     = 0xDB

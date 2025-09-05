@@ -164,7 +164,8 @@ func (cm *ConnMap) ProcessUDPConnection(iphdr IPHeader, packet []byte) (ConnKey,
 		IP:   net.IP(iphdr.DstIP[:]),
 		Port: dport,
 	}
-	if (src & 0xffffff00) != 0x0a000200 {
+
+	if (src & 0xffffff00) != GUEST_SUBNET {
 		addr.IP = net.IP(iphdr.SrcIP[:])
 		addr.Port = sport
 		tmp := src
