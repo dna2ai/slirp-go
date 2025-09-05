@@ -30,6 +30,11 @@ if start a http server in user mode linux `nginx`, and outside:
 $ curl --socks5 127.0.0.1:1080 http://10.0.2.15
 ```
 
+if start udp\_server in user mode linux, and outside:
+```
+$ udp_client
+```
+
 ## known issues and future work
 
 - [ ] no ipv6 support yet
