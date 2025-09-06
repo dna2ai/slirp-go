@@ -260,6 +260,8 @@ func (cv *ConnVal) handleTcpResponse() {
 					go seqPrintPacket(encoded)
 				}
 				cv.lock.Unlock()
+			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
 			} else {
 				cv.lock.Lock()
 				iphdr := cv.state.lastClientIpHeader
